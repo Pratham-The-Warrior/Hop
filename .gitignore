@@ -1,0 +1,26 @@
+# Binaries
+hop.exe
+hop
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+
+# Go build cache
+/vendor/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Hop runtime
+.hop-resume-*
