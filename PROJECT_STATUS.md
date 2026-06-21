@@ -1,7 +1,7 @@
 # Hop — Project Status
 
 > **Last updated:** 2026-06-21  
-> **Current milestone:** 3 of 12 complete  
+> **Current milestone:** 4 of 12 complete  
 > **Branch:** `master`
 
 ---
@@ -40,7 +40,16 @@ All Cobra commands are wired and functional:
 - `pkg/protocol/version.go` — `HOP/1.0` versioning + feature flag negotiation
 - `pkg/history/history.go` — append-only transfer log at `~/.hop/history.log`
 
-**Tests:** 26 passing (crypto: 10, token: 5, transfer: 8, transfer misc: 3)  
+### Milestone 4 — Minimal Relay Service
+- `relay/auth.go` — Ed25519 + JWT session authentication (24h ephemeral sessions)
+- `relay/registry.go` — In-memory token → session registry with 24h auto-expiry
+- `relay/bridge.go` — WebSocket bidirectional data bridge (sender ↔ relay ↔ receiver)
+- `relay/ratelimit.go` — Per-IP rate limiting (5 conns/IP, 10 lookups/min, 5-min ban)
+- `relay/server.go` — HTTP server with logging, recovery & rate-limit middleware
+- `relay/main.go` — Standalone relay binary (`--addr`, `--tls`, `--cert`, `--key`)
+- `pkg/relay/client.go` — Relay client library (auth, register/join, message send/receive)
+
+**Tests:** 54 passing (crypto: 10, token: 5, transfer: 8, relay server: 21, relay client: 7, transfer misc: 3)  
 **Static analysis:** `go vet` clean
 
 ---
@@ -49,7 +58,6 @@ All Cobra commands are wired and functional:
 
 | # | Milestone | What it covers |
 |---|-----------|---------------|
-| 4 | **Minimal Relay Service** | Deploy `relay/` package — session auth (Ed25519 + JWT), rate limiting, basic data bridge |
 | 5 | **Tier 3 Fallback** | End-to-end relay transfers between two machines, transfer acceptance, protocol handshake, token security |
 | 6 | **NAT Hole Punching (Tier 2)** | Signaling server, UDP punch coordination (3 attempts, 5s timeout) |
 | 7 | **LAN Fast-Path (Tier 1)** | UDP broadcast probe (500ms timeout), local network detection |
@@ -74,21 +82,29 @@ hop/
 │   ├── token/        # Transfer token generation
 │   ├── transfer/     # File chunker, rate limiter
 │   ├── protocol/     # Wire format, versioning
+│   ├── relay/        # Relay client library
 │   ├── tui/          # Terminal UI (progress, tunnel, QR)
 │   └── history/      # Transfer history log
-└── relay/            # (not started — Milestone 4)
+└── relay/            # Standalone relay server binary
+    ├── main.go       # Entry point (--addr, --tls flags)
+    ├── server.go     # HTTP server + middleware
+    ├── auth.go       # Ed25519 + JWT session auth
+    ├── registry.go   # Token → session mapping
+    ├── bridge.go     # WebSocket data bridge
+    └── ratelimit.go  # Per-IP abuse prevention
 ```
 
 ---
 
 ## 🚀 Where to Start Next
 
-**Begin with Milestone 4: Minimal Relay Service.**
+**Begin with Milestone 5: Tier 3 Fallback (Production Relay Transfers).**
 
-1. Create the `relay/` package with its own `main.go` entry point
-2. Implement session authentication (ephemeral Ed25519 + JWT)
-3. Build the basic data bridge (Tier 3 relay streaming)
-4. Add rate limiting and abuse prevention
-5. Deploy to a cloud server and test with two machines on different networks
+1. Wire `cmd/share.go` and `cmd/get.go` to use `pkg/relay/client.go`
+2. Implement the full transfer flow: offer → accept → encrypted chunk streaming → completion
+3. Add protocol version handshake over the relay connection
+4. Implement transfer acceptance prompt with file metadata preview
+5. Add token security: entropy validation, expiry, one-time consumption
+6. Test end-to-end with two separate machines on different networks
 
-The relay is the backbone — once it works, Milestones 5–10 all build on top of it.
+The relay infrastructure is live — Milestone 5 connects the CLI to it for real file transfers.
