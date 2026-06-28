@@ -1,7 +1,7 @@
 # Hop — Project Status
 
-> **Last updated:** 2026-06-21  
-> **Current milestone:** 4 of 12 complete  
+> **Last updated:** 2026-06-28  
+> **Current milestone:** 5 of 12 complete  
 > **Branch:** `master`
 
 ---
@@ -49,7 +49,18 @@ All Cobra commands are wired and functional:
 - `relay/main.go` — Standalone relay binary (`--addr`, `--tls`, `--cert`, `--key`)
 - `pkg/relay/client.go` — Relay client library (auth, register/join, message send/receive)
 
-**Tests:** 54 passing (crypto: 10, token: 5, transfer: 8, relay server: 21, relay client: 7, transfer misc: 3)  
+### Milestone 5 — Tier 3 Relay Transfers
+- `pkg/transfer/engine.go` — Full sender/receiver orchestration (handshake → offer → encrypted chunks → verify)
+- `pkg/protocol/handshake.go` — HOP_HELLO key exchange, TRANSFER_ACCEPT, TRANSFER_COMPLETE payloads
+- `pkg/config/config.go` — Relay URL configuration via `HOP_RELAY` env var
+- `cmd/share.go` — Wired to relay: auth → register → encrypted chunk streaming → SHA-256 verify → history log
+- `cmd/get.go` — Wired to relay: auth → join → acceptance prompt → decryption → CRC-32/SHA-256 verify → history log
+- Both commands: Ctrl+C graceful shutdown with `TRANSFER_CANCEL` signaling
+- E2E encrypted: X25519 ECDH → HKDF-SHA256 → ChaCha20-Poly1305 per-chunk encryption
+- Integrity: CRC-32 per chunk + SHA-256 full-file verification
+- Protocol handshake with version compatibility check and feature flag negotiation
+
+**Tests:** 66 passing (crypto: 10, token: 5, protocol: 7, transfer engine: 5, transfer misc: 11, relay server: 21, relay client: 7)  
 **Static analysis:** `go vet` clean
 
 ---
@@ -58,7 +69,6 @@ All Cobra commands are wired and functional:
 
 | # | Milestone | What it covers |
 |---|-----------|---------------|
-| 5 | **Tier 3 Fallback** | End-to-end relay transfers between two machines, transfer acceptance, protocol handshake, token security |
 | 6 | **NAT Hole Punching (Tier 2)** | Signaling server, UDP punch coordination (3 attempts, 5s timeout) |
 | 7 | **LAN Fast-Path (Tier 1)** | UDP broadcast probe (500ms timeout), local network detection |
 | 8 | **Chunk-Level Resume** | CRC-32 chunk fingerprints, `.hop-resume-*` marker files, resume negotiation |
@@ -78,10 +88,11 @@ hop/
 │   ├── root.go, share.go, get.go
 │   ├── http.go, replay.go, completion.go
 ├── pkg/
+│   ├── config/       # Relay URL and env configuration
 │   ├── crypto/       # X25519, ChaCha20, CRC-32, SHA-256
 │   ├── token/        # Transfer token generation
-│   ├── transfer/     # File chunker, rate limiter
-│   ├── protocol/     # Wire format, versioning
+│   ├── transfer/     # File chunker, rate limiter, transfer engine
+│   ├── protocol/     # Wire format, versioning, handshake payloads
 │   ├── relay/        # Relay client library
 │   ├── tui/          # Terminal UI (progress, tunnel, QR)
 │   └── history/      # Transfer history log
@@ -98,13 +109,12 @@ hop/
 
 ## 🚀 Where to Start Next
 
-**Begin with Milestone 5: Tier 3 Fallback (Production Relay Transfers).**
+**Begin with Milestone 6: NAT Hole Punching (Tier 2 — Direct P2P).**
 
-1. Wire `cmd/share.go` and `cmd/get.go` to use `pkg/relay/client.go`
-2. Implement the full transfer flow: offer → accept → encrypted chunk streaming → completion
-3. Add protocol version handshake over the relay connection
-4. Implement transfer acceptance prompt with file metadata preview
-5. Add token security: entropy validation, expiry, one-time consumption
-6. Test end-to-end with two separate machines on different networks
+1. Implement a signaling server (or add signaling to the existing relay)
+2. UDP hole punch coordination: both peers exchange public IP:port via signaling
+3. Synchronized UDP punch attempts (3 tries, ~1.5s apart, 5s total timeout)
+4. Fall back to Tier 3 relay if hole punching fails
+5. Wire tier selection logic into the transfer engine
 
-The relay infrastructure is live — Milestone 5 connects the CLI to it for real file transfers.
+Milestone 5 is complete — `hop share` and `hop get` now perform real encrypted transfers via the relay. The next step is to add direct P2P connectivity to bypass the relay when possible.
