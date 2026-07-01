@@ -32,6 +32,7 @@ const (
 	FeatureResume                                // Chunk-level resume support
 	FeatureBrowserBridge                         // Browser Bridge support
 	FeatureTunneling                             // HTTP tunnel support
+	FeatureHolePunch                             // UDP NAT hole punch support
 )
 
 // Has checks if a specific feature flag is set.
@@ -41,7 +42,7 @@ func (f FeatureFlags) Has(flag FeatureFlags) bool {
 
 // AllFeatures returns all features supported by this build.
 func AllFeatures() FeatureFlags {
-	return FeatureCompression | FeatureResume | FeatureBrowserBridge | FeatureTunneling
+	return FeatureCompression | FeatureResume | FeatureBrowserBridge | FeatureTunneling | FeatureHolePunch
 }
 
 // Negotiate returns the intersection of two feature flag sets.

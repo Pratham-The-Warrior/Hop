@@ -282,6 +282,10 @@ func (c *channelClient) Receive(ctx context.Context) (*protocol.Message, error) 
 	}
 }
 
+func (c *channelClient) Close() error {
+	return nil
+}
+
 // sendFileViaChannels is a copy of SendFile that uses channelClient instead of *relay.Client.
 // This avoids needing a real WebSocket connection for tests.
 func sendFileViaChannels(ctx context.Context, client *channelClient, filePath string, compress bool, limiter *TokenBucketLimiter, callbacks *EngineCallbacks) error {

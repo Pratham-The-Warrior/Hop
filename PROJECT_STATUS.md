@@ -1,7 +1,7 @@
 # Hop — Project Status
 
-> **Last updated:** 2026-06-28  
-> **Current milestone:** 5 of 12 complete  
+> **Last updated:** 2026-07-01  
+> **Current milestone:** 7 of 12 complete  
 > **Branch:** `master`
 
 ---
@@ -60,6 +60,21 @@ All Cobra commands are wired and functional:
 - Integrity: CRC-32 per chunk + SHA-256 full-file verification
 - Protocol handshake with version compatibility check and feature flag negotiation
 
+### Milestone 6 — NAT Hole Punching (Tier 2)
+- `relay/signal.go` — WebSocket signaling endpoint for peer address exchange
+- `pkg/protocol/signaling.go` — `PEER_INFO` and `PUNCH_SIGNAL` message encoding
+- `pkg/network/punch.go` — UDP NAT hole punch coordination (3 probes, 5s timeout)
+- `pkg/network/transport.go` — `UDPTransport` implementing fragmentation and stop-and-wait reliability
+- `pkg/network/connector.go` — Tier waterfall connection negotiation (P2P fallback to Relay)
+- `cmd/share.go` & `cmd/get.go` — Integrated tier negotiation and transport abstraction
+
+### Milestone 7 — LAN Fast-Path (Tier 1)
+- `pkg/protocol/lan.go` — `LAN_PROBE` and `LAN_RESPONSE` wire format (UDP broadcast discovery packets)
+- `pkg/network/lan.go` — UDP broadcast LAN discovery engine (500ms timeout, 100ms probe interval)
+- `pkg/network/lantransport.go` — `TCPTransport` implementing `transfer.Transport` over raw TCP
+- `pkg/network/connector.go` — Full 3-tier waterfall: Tier 1 (LAN) → Tier 2 (P2P) → Tier 3 (Relay)
+- `cmd/share.go` & `cmd/get.go` — Integrated LAN discovery with role-based coordination
+
 **Tests:** 66 passing (crypto: 10, token: 5, protocol: 7, transfer engine: 5, transfer misc: 11, relay server: 21, relay client: 7)  
 **Static analysis:** `go vet` clean
 
@@ -69,8 +84,6 @@ All Cobra commands are wired and functional:
 
 | # | Milestone | What it covers |
 |---|-----------|---------------|
-| 6 | **NAT Hole Punching (Tier 2)** | Signaling server, UDP punch coordination (3 attempts, 5s timeout) |
-| 7 | **LAN Fast-Path (Tier 1)** | UDP broadcast probe (500ms timeout), local network detection |
 | 8 | **Chunk-Level Resume** | CRC-32 chunk fingerprints, `.hop-resume-*` marker files, resume negotiation |
 | 9 | **Browser Bridge** | HTTPS relay for browser downloads, abuse prevention controls |
 | 10 | **Full Tunnel Suite** | HTTPS termination, request replay inspector (buffer + body caps), password protection (bcrypt) |
@@ -92,7 +105,8 @@ hop/
 │   ├── crypto/       # X25519, ChaCha20, CRC-32, SHA-256
 │   ├── token/        # Transfer token generation
 │   ├── transfer/     # File chunker, rate limiter, transfer engine
-│   ├── protocol/     # Wire format, versioning, handshake payloads
+│   ├── protocol/     # Wire format, versioning, handshake, LAN discovery
+│   ├── network/      # LAN discovery, P2P hole punch, TCP/UDP transports
 │   ├── relay/        # Relay client library
 │   ├── tui/          # Terminal UI (progress, tunnel, QR)
 │   └── history/      # Transfer history log
@@ -102,6 +116,7 @@ hop/
     ├── auth.go       # Ed25519 + JWT session auth
     ├── registry.go   # Token → session mapping
     ├── bridge.go     # WebSocket data bridge
+    ├── signal.go     # WebSocket signaling for P2P hole punch
     └── ratelimit.go  # Per-IP abuse prevention
 ```
 
@@ -109,12 +124,11 @@ hop/
 
 ## 🚀 Where to Start Next
 
-**Begin with Milestone 6: NAT Hole Punching (Tier 2 — Direct P2P).**
+**Begin with Milestone 8: Chunk-Level Resume.**
 
-1. Implement a signaling server (or add signaling to the existing relay)
-2. UDP hole punch coordination: both peers exchange public IP:port via signaling
-3. Synchronized UDP punch attempts (3 tries, ~1.5s apart, 5s total timeout)
-4. Fall back to Tier 3 relay if hole punching fails
-5. Wire tier selection logic into the transfer engine
+1. Add `.hop-resume-<sha256-prefix>` marker files to persist the resume offset.
+2. Implement resume negotiation protocol (`RESUME_REQUEST` / `RESUME_ACCEPT`).
+3. Sender skips to the resume offset; receiver appends from where it left off.
+4. Clean up marker files on successful transfer completion.
 
-Milestone 5 is complete — `hop share` and `hop get` now perform real encrypted transfers via the relay. The next step is to add direct P2P connectivity to bypass the relay when possible.
+Milestone 7 is complete — `hop share` and `hop get` now attempt LAN discovery first (500ms), then P2P hole punching, then relay fallback.

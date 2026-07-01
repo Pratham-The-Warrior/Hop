@@ -299,3 +299,9 @@ func (c *Client) IsConnected() bool {
 func (c *Client) RelayURL() string {
 	return c.relayURL
 }
+
+// SessionToken returns the JWT session token obtained during authentication.
+// Returns an empty string if not yet authenticated.
+func (c *Client) SessionToken() string {
+	return c.token
+}

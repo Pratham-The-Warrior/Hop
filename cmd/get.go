@@ -13,6 +13,7 @@ import (
 
 	"github.com/prathmeshsarda/hop/pkg/config"
 	"github.com/prathmeshsarda/hop/pkg/history"
+	"github.com/prathmeshsarda/hop/pkg/network"
 	"github.com/prathmeshsarda/hop/pkg/protocol"
 	"github.com/prathmeshsarda/hop/pkg/relay"
 	"github.com/prathmeshsarda/hop/pkg/transfer"
@@ -104,14 +105,31 @@ func runGet(cmd *cobra.Command, args []string) {
 	}
 	defer client.Close()
 
+	// Attempt P2P connection, fall back to relay
+	fmt.Println("Negotiating connection tier...")
+	connResult, err := network.Connect(ctx, network.ConnectConfig{
+		RelayURL:     relayURL,
+		Token:        tok,
+		SessionToken: client.SessionToken(),
+		EnableLAN:    true,
+		EnableP2P:    true,
+		Role:         "receiver",
+	}, client)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: connection negotiation failed: %v\n", err)
+		os.Exit(1)
+	}
+	transport := connResult.Transport
+	actualTier := connResult.Tier
+
 	// Handle Ctrl+C in background
 	go func() {
 		select {
 		case <-sigCh:
 			fmt.Println("\n\nTransfer cancelled.")
 			cancelMsg := &protocol.Message{Type: protocol.MsgTransferCancel}
-			_ = client.Send(context.Background(), cancelMsg)
-			client.Close()
+			_ = transport.Send(context.Background(), cancelMsg)
+			transport.Close()
 			cancel()
 		case <-ctx.Done():
 		}
@@ -124,7 +142,7 @@ func runGet(cmd *cobra.Command, args []string) {
 
 	callbacks := &transfer.EngineCallbacks{
 		OnHandshakeComplete: func(tier tui.ConnectionTier) {
-			fmt.Printf("Connection: %s\n", tier.String())
+			fmt.Printf("Connection: %s\n", actualTier.String())
 			fmt.Println()
 		},
 		OnOfferReceived: func(offer *protocol.TransferOffer) bool {
@@ -144,7 +162,7 @@ func runGet(cmd *cobra.Command, args []string) {
 				// Initialize progress bar
 				progressBar = tui.NewProgressBar(offer.FileName, offer.FileSize, tok, "")
 				progressBar.Direction = "receiving"
-				progressBar.Tier = tui.TierRelayed
+				progressBar.Tier = actualTier
 				return true
 			}
 
@@ -162,7 +180,7 @@ func runGet(cmd *cobra.Command, args []string) {
 				// Initialize progress bar
 				progressBar = tui.NewProgressBar(offer.FileName, offer.FileSize, tok, "")
 				progressBar.Direction = "receiving"
-				progressBar.Tier = tui.TierRelayed
+				progressBar.Tier = actualTier
 				fmt.Println()
 				return true
 			}
@@ -191,7 +209,7 @@ func runGet(cmd *cobra.Command, args []string) {
 		},
 	}
 
-	err := transfer.ReceiveFile(ctx, client, outputDir, callbacks)
+	err = transfer.ReceiveFile(ctx, transport, outputDir, callbacks)
 	if err != nil {
 		if ctx.Err() != nil {
 			os.Exit(1)
@@ -211,7 +229,7 @@ func runGet(cmd *cobra.Command, args []string) {
 		FileName:  receivedFileName,
 		FileSize:  "—",
 		Token:     tok,
-		Tier:      "Relay",
+		Tier:      actualTier.String(),
 		Duration:  formatDuration(duration),
 		Verified:  true,
 	})

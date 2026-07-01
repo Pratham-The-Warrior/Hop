@@ -41,6 +41,10 @@ const (
 	// Signaling (for NAT hole punching)
 	MsgPeerInfo       MessageType = 0x60
 	MsgPunchSignal    MessageType = 0x61
+
+	// LAN discovery
+	MsgLANProbe    MessageType = 0x70
+	MsgLANResponse MessageType = 0x71
 )
 
 // String returns a human-readable name for the message type.
@@ -82,6 +86,10 @@ func (mt MessageType) String() string {
 		return "PEER_INFO"
 	case MsgPunchSignal:
 		return "PUNCH_SIGNAL"
+	case MsgLANProbe:
+		return "LAN_PROBE"
+	case MsgLANResponse:
+		return "LAN_RESPONSE"
 	default:
 		return fmt.Sprintf("UNKNOWN(0x%02x)", uint8(mt))
 	}

@@ -8,7 +8,6 @@ import (
 
 	hopcrypto "github.com/prathmeshsarda/hop/pkg/crypto"
 	"github.com/prathmeshsarda/hop/pkg/protocol"
-	"github.com/prathmeshsarda/hop/pkg/relay"
 	"github.com/prathmeshsarda/hop/pkg/tui"
 )
 
@@ -39,7 +38,7 @@ type EngineCallbacks struct {
 //  3. Send TRANSFER_OFFER and wait for ACCEPT/REJECT
 //  4. Stream encrypted chunks with CRC-32 integrity
 //  5. Send TRANSFER_COMPLETE with final hash
-func SendFile(ctx context.Context, client *relay.Client, filePath string, compress bool, limiter *TokenBucketLimiter, callbacks *EngineCallbacks) error {
+func SendFile(ctx context.Context, transport Transport, filePath string, compress bool, limiter *TokenBucketLimiter, callbacks *EngineCallbacks) error {
 	if callbacks == nil {
 		callbacks = &EngineCallbacks{}
 	}
@@ -66,12 +65,12 @@ func SendFile(ctx context.Context, client *relay.Client, filePath string, compre
 		Type:    protocol.MsgHopHello,
 		Payload: protocol.EncodeHopHello(hello),
 	}
-	if err := client.Send(ctx, helloMsg); err != nil {
+	if err := transport.Send(ctx, helloMsg); err != nil {
 		return fmt.Errorf("sending HOP_HELLO: %w", err)
 	}
 
 	// Wait for HOP_HELLO_ACK from receiver
-	ackMsg, err := client.Receive(ctx)
+	ackMsg, err := transport.Receive(ctx)
 	if err != nil {
 		return fmt.Errorf("receiving HOP_HELLO_ACK: %w", err)
 	}
@@ -122,12 +121,12 @@ func SendFile(ctx context.Context, client *relay.Client, filePath string, compre
 		Type:    protocol.MsgTransferOffer,
 		Payload: protocol.EncodeTransferOffer(offer),
 	}
-	if err := client.Send(ctx, offerMsg); err != nil {
+	if err := transport.Send(ctx, offerMsg); err != nil {
 		return fmt.Errorf("sending TRANSFER_OFFER: %w", err)
 	}
 
 	// Wait for TRANSFER_ACCEPT or TRANSFER_REJECT
-	respMsg, err := client.Receive(ctx)
+	respMsg, err := transport.Receive(ctx)
 	if err != nil {
 		return fmt.Errorf("waiting for transfer response: %w", err)
 	}
@@ -156,7 +155,7 @@ func SendFile(ctx context.Context, client *relay.Client, filePath string, compre
 		case <-ctx.Done():
 			// Send cancellation
 			cancelMsg := &protocol.Message{Type: protocol.MsgTransferCancel}
-			_ = client.Send(context.Background(), cancelMsg)
+			_ = transport.Send(context.Background(), cancelMsg)
 			return ctx.Err()
 		default:
 		}
@@ -201,12 +200,12 @@ func SendFile(ctx context.Context, client *relay.Client, filePath string, compre
 			Type:    protocol.MsgChunkData,
 			Payload: payload,
 		}
-		if err := client.Send(ctx, chunkMsg); err != nil {
+		if err := transport.Send(ctx, chunkMsg); err != nil {
 			return fmt.Errorf("sending chunk %d: %w", chunk.Index, err)
 		}
 
 		// Wait for CHUNK_ACK (stop-and-wait flow control)
-		ackResp, err := client.Receive(ctx)
+		ackResp, err := transport.Receive(ctx)
 		if err != nil {
 			return fmt.Errorf("waiting for chunk %d ACK: %w", chunk.Index, err)
 		}
@@ -235,7 +234,7 @@ func SendFile(ctx context.Context, client *relay.Client, filePath string, compre
 		Type:    protocol.MsgTransferComplete,
 		Payload: protocol.EncodeTransferComplete(complete),
 	}
-	if err := client.Send(ctx, completeMsg); err != nil {
+	if err := transport.Send(ctx, completeMsg); err != nil {
 		return fmt.Errorf("sending TRANSFER_COMPLETE: %w", err)
 	}
 
@@ -252,7 +251,7 @@ func SendFile(ctx context.Context, client *relay.Client, filePath string, compre
 //  2. Receive TRANSFER_OFFER and present to user for acceptance
 //  3. Receive encrypted chunks, decrypt, verify CRC-32, write to disk
 //  4. Verify final SHA-256 hash
-func ReceiveFile(ctx context.Context, client *relay.Client, outputDir string, callbacks *EngineCallbacks) error {
+func ReceiveFile(ctx context.Context, transport Transport, outputDir string, callbacks *EngineCallbacks) error {
 	if callbacks == nil {
 		callbacks = &EngineCallbacks{}
 	}
@@ -264,7 +263,7 @@ func ReceiveFile(ctx context.Context, client *relay.Client, outputDir string, ca
 	}
 
 	// Wait for sender's HOP_HELLO
-	helloMsg, err := client.Receive(ctx)
+	helloMsg, err := transport.Receive(ctx)
 	if err != nil {
 		return fmt.Errorf("receiving HOP_HELLO: %w", err)
 	}
@@ -294,7 +293,7 @@ func ReceiveFile(ctx context.Context, client *relay.Client, outputDir string, ca
 		Type:    protocol.MsgHopHelloAck,
 		Payload: protocol.EncodeHopHello(ack),
 	}
-	if err := client.Send(ctx, ackMsg); err != nil {
+	if err := transport.Send(ctx, ackMsg); err != nil {
 		return fmt.Errorf("sending HOP_HELLO_ACK: %w", err)
 	}
 
@@ -318,7 +317,7 @@ func ReceiveFile(ctx context.Context, client *relay.Client, outputDir string, ca
 	}
 
 	// --- Step 2: Receive TRANSFER_OFFER ---
-	offerMsg, err := client.Receive(ctx)
+	offerMsg, err := transport.Receive(ctx)
 	if err != nil {
 		return fmt.Errorf("receiving TRANSFER_OFFER: %w", err)
 	}
@@ -339,7 +338,7 @@ func ReceiveFile(ctx context.Context, client *relay.Client, outputDir string, ca
 
 	if !accepted {
 		rejectMsg := &protocol.Message{Type: protocol.MsgTransferReject}
-		_ = client.Send(ctx, rejectMsg)
+		_ = transport.Send(ctx, rejectMsg)
 		return fmt.Errorf("transfer rejected by user")
 	}
 
@@ -349,7 +348,7 @@ func ReceiveFile(ctx context.Context, client *relay.Client, outputDir string, ca
 		Type:    protocol.MsgTransferAccept,
 		Payload: protocol.EncodeTransferAccept(acceptPayload),
 	}
-	if err := client.Send(ctx, acceptMsg); err != nil {
+	if err := transport.Send(ctx, acceptMsg); err != nil {
 		return fmt.Errorf("sending TRANSFER_ACCEPT: %w", err)
 	}
 
@@ -368,12 +367,12 @@ func ReceiveFile(ctx context.Context, client *relay.Client, outputDir string, ca
 		select {
 		case <-ctx.Done():
 			rejectMsg := &protocol.Message{Type: protocol.MsgTransferCancel}
-			_ = client.Send(context.Background(), rejectMsg)
+			_ = transport.Send(context.Background(), rejectMsg)
 			return ctx.Err()
 		default:
 		}
 
-		msg, err := client.Receive(ctx)
+		msg, err := transport.Receive(ctx)
 		if err != nil {
 			return fmt.Errorf("receiving data: %w", err)
 		}
@@ -445,7 +444,7 @@ func ReceiveFile(ctx context.Context, client *relay.Client, outputDir string, ca
 			Type:    protocol.MsgChunkAck,
 			Payload: protocol.EncodeChunkHeader(chunkHdr),
 		}
-		if err := client.Send(ctx, chunkAck); err != nil {
+		if err := transport.Send(ctx, chunkAck); err != nil {
 			return fmt.Errorf("sending CHUNK_ACK for chunk %d: %w", chunkHdr.Index, err)
 		}
 

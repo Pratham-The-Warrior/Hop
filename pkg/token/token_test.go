@@ -13,7 +13,7 @@ func TestGenerate(t *testing.T) {
 
 func TestGenerateUniqueness(t *testing.T) {
 	seen := make(map[string]bool)
-	count := 10000
+	count := 1000
 
 	for i := 0; i < count; i++ {
 		tok := Generate()

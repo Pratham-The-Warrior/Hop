@@ -13,6 +13,7 @@ import (
 	"github.com/prathmeshsarda/hop/pkg/config"
 	"github.com/prathmeshsarda/hop/pkg/crypto"
 	"github.com/prathmeshsarda/hop/pkg/history"
+	"github.com/prathmeshsarda/hop/pkg/network"
 	"github.com/prathmeshsarda/hop/pkg/protocol"
 	"github.com/prathmeshsarda/hop/pkg/relay"
 	"github.com/prathmeshsarda/hop/pkg/token"
@@ -101,10 +102,27 @@ func runShare(cmd *cobra.Command, args []string) {
 	}
 	defer client.Close()
 
+	// Attempt P2P connection, fall back to relay
+	fmt.Println("Negotiating connection tier...")
+	connResult, err := network.Connect(ctx, network.ConnectConfig{
+		RelayURL:     relayURL,
+		Token:        tok,
+		SessionToken: client.SessionToken(),
+		EnableLAN:    true,
+		EnableP2P:    true,
+		Role:         "sender",
+	}, client)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: connection negotiation failed: %v\n", err)
+		os.Exit(1)
+	}
+	transport := connResult.Transport
+	actualTier := connResult.Tier
+
 	// Set up TUI
 	renderer := tui.NewRenderer()
 	progressBar := tui.NewProgressBar(name, info.Size(), tok, link)
-	progressBar.Tier = tui.TierRelayed
+	progressBar.Tier = actualTier
 
 	if shareCompress {
 		progressBar.Compress = true
@@ -179,7 +197,7 @@ func runShare(cmd *cobra.Command, args []string) {
 		},
 	}
 
-	err = transfer.SendFile(ctx, client, target, shareCompress, limiter, callbacks)
+	err = transfer.SendFile(ctx, transport, target, shareCompress, limiter, callbacks)
 	if err != nil {
 		if ctx.Err() != nil {
 			// Already handled by signal handler
@@ -197,7 +215,7 @@ func runShare(cmd *cobra.Command, args []string) {
 		FileName:  name,
 		FileSize:  formatSize(info.Size()),
 		Token:     tok,
-		Tier:      "Relay",
+		Tier:      actualTier.String(),
 		Duration:  formatDuration(duration),
 		Verified:  true,
 	})

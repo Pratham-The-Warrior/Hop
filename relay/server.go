@@ -16,6 +16,7 @@ type RelayServer struct {
 	registry *Registry
 	limiter  *RateLimiter
 	bridge   *Bridge
+	signal   *SignalServer
 	logger   *log.Logger
 	server   *http.Server
 }
@@ -40,6 +41,7 @@ func NewRelayServer(cfg ServerConfig) (*RelayServer, error) {
 	registry := NewRegistry()
 	limiter := NewRateLimiter()
 	bridge := NewBridge(auth, registry, limiter, logger)
+	signal := NewSignalServer(auth, registry, limiter, logger)
 
 	rs := &RelayServer{
 		addr:     cfg.Addr,
@@ -47,6 +49,7 @@ func NewRelayServer(cfg ServerConfig) (*RelayServer, error) {
 		registry: registry,
 		limiter:  limiter,
 		bridge:   bridge,
+		signal:   signal,
 		logger:   logger,
 	}
 
@@ -54,6 +57,7 @@ func NewRelayServer(cfg ServerConfig) (*RelayServer, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/auth", rs.handleAuth)
 	mux.HandleFunc("/ws", rs.handleWS)
+	mux.HandleFunc("/signal", rs.handleSignal)
 	mux.HandleFunc("/health", rs.handleHealth)
 
 	// Wrap with middleware
@@ -104,6 +108,10 @@ func (rs *RelayServer) handleAuth(w http.ResponseWriter, r *http.Request) {
 
 func (rs *RelayServer) handleWS(w http.ResponseWriter, r *http.Request) {
 	rs.bridge.HandleWebSocket(w, r)
+}
+
+func (rs *RelayServer) handleSignal(w http.ResponseWriter, r *http.Request) {
+	rs.signal.HandleSignal(w, r)
 }
 
 func (rs *RelayServer) handleHealth(w http.ResponseWriter, r *http.Request) {
