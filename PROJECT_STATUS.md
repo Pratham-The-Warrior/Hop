@@ -1,7 +1,7 @@
 # Hop — Project Status
 
-> **Last updated:** 2026-07-01  
-> **Current milestone:** 7 of 12 complete  
+> **Last updated:** 2026-07-03  
+> **Current milestone:** 8 of 12 complete  
 > **Branch:** `master`
 
 ---
@@ -75,7 +75,16 @@ All Cobra commands are wired and functional:
 - `pkg/network/connector.go` — Full 3-tier waterfall: Tier 1 (LAN) → Tier 2 (P2P) → Tier 3 (Relay)
 - `cmd/share.go` & `cmd/get.go` — Integrated LAN discovery with role-based coordination
 
-**Tests:** 66 passing (crypto: 10, token: 5, protocol: 7, transfer engine: 5, transfer misc: 11, relay server: 21, relay client: 7)  
+### Milestone 8 — Chunk-Level Resume
+- `pkg/protocol/resume.go` — `ResumeRequest` and `ResumeAccept` wire format (SHA-256 prefix, offset, chunk index, partial hash)
+- `pkg/transfer/resume.go` — `.hop-resume-<sha256-prefix>` JSON marker files with atomic writes, detection, and cleanup
+- `pkg/transfer/engine.go` — Sender: parse resume offset from TRANSFER_ACCEPT, seek chunker, skip encryptor nonces
+- `pkg/transfer/engine.go` — Receiver: detect partial files via markers, open in append mode, re-hash for streaming SHA-256, periodic marker updates, cleanup on completion
+- `pkg/crypto/cipher.go` — `SkipNonces(n)` for deterministic nonce advancement on resume
+- `cmd/get.go` — `--resume` flag wired into engine with resume progress display
+- `cmd/share.go` — `OnResumeDetected` callback for sender-side resume notification
+
+**Tests:** 85 passing (crypto: 10, token: 5, protocol: 12, transfer engine: 6, transfer resume: 11, transfer misc: 11, relay server: 21, relay client: 7, build: 2)  
 **Static analysis:** `go vet` clean
 
 ---
@@ -84,7 +93,6 @@ All Cobra commands are wired and functional:
 
 | # | Milestone | What it covers |
 |---|-----------|---------------|
-| 8 | **Chunk-Level Resume** | CRC-32 chunk fingerprints, `.hop-resume-*` marker files, resume negotiation |
 | 9 | **Browser Bridge** | HTTPS relay for browser downloads, abuse prevention controls |
 | 10 | **Full Tunnel Suite** | HTTPS termination, request replay inspector (buffer + body caps), password protection (bcrypt) |
 | 11 | **Directory + Compression** | tar.gz packaging, zstd streaming compression (`--compress`), bandwidth throttling (`--limit`) |
@@ -104,8 +112,8 @@ hop/
 │   ├── config/       # Relay URL and env configuration
 │   ├── crypto/       # X25519, ChaCha20, CRC-32, SHA-256
 │   ├── token/        # Transfer token generation
-│   ├── transfer/     # File chunker, rate limiter, transfer engine
-│   ├── protocol/     # Wire format, versioning, handshake, LAN discovery
+│   ├── transfer/     # File chunker, rate limiter, transfer engine, resume markers
+│   ├── protocol/     # Wire format, versioning, handshake, resume, LAN discovery
 │   ├── network/      # LAN discovery, P2P hole punch, TCP/UDP transports
 │   ├── relay/        # Relay client library
 │   ├── tui/          # Terminal UI (progress, tunnel, QR)
@@ -124,11 +132,11 @@ hop/
 
 ## 🚀 Where to Start Next
 
-**Begin with Milestone 8: Chunk-Level Resume.**
+**Begin with Milestone 9: Browser Bridge.**
 
-1. Add `.hop-resume-<sha256-prefix>` marker files to persist the resume offset.
-2. Implement resume negotiation protocol (`RESUME_REQUEST` / `RESUME_ACCEPT`).
-3. Sender skips to the resume offset; receiver appends from where it left off.
-4. Clean up marker files on successful transfer completion.
+1. Add an HTTPS download endpoint to the relay server.
+2. Implement abuse prevention controls (rate limiting, token validation).
+3. Allow receivers to download files via browser using the `hop.to` link.
+4. Maintain end-to-end encryption for CLI-to-CLI; browser bridge uses TLS only.
 
-Milestone 7 is complete — `hop share` and `hop get` now attempt LAN discovery first (500ms), then P2P hole punching, then relay fallback.
+Milestone 8 is complete — interrupted transfers can now resume from the last successfully received chunk using `.hop-resume-*` marker files.

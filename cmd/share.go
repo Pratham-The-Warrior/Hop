@@ -195,6 +195,12 @@ func runShare(cmd *cobra.Command, args []string) {
 		OnError: func(err error) {
 			fmt.Fprintf(os.Stderr, "\nError: %v\n", err)
 		},
+		OnResumeDetected: func(offset int64, total int64) {
+			if total > 0 {
+				pct := float64(offset) / float64(total) * 100
+				fmt.Printf("Receiver resuming from %s / %s (%.1f%%)\n", formatSize(offset), formatSize(total), pct)
+			}
+		},
 	}
 
 	err = transfer.SendFile(ctx, transport, target, shareCompress, limiter, callbacks)

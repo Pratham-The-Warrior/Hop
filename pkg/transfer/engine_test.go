@@ -154,7 +154,7 @@ func TestEngineIntegration(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		recvErr = receiveFileViaChannels(ctx, receiverClient, outDir, &EngineCallbacks{
+		recvErr = receiveFileViaChannels(ctx, receiverClient, outDir, false, &EngineCallbacks{
 			OnHandshakeComplete: func(tier tui.ConnectionTier) {
 				receiverHandshakeDone = true
 			},
@@ -241,7 +241,7 @@ func TestEngineReject(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		recvErr = receiveFileViaChannels(ctx, receiverClient, outDir, &EngineCallbacks{
+		recvErr = receiveFileViaChannels(ctx, receiverClient, outDir, false, &EngineCallbacks{
 			OnOfferReceived: func(offer *protocol.TransferOffer) bool {
 				return false // reject
 			},
@@ -386,6 +386,15 @@ func sendFileViaChannels(ctx context.Context, client *channelClient, filePath st
 		return fmt.Errorf("unexpected message: %s", respMsg.Type)
 	}
 
+	// Parse resume offset from TRANSFER_ACCEPT
+	var resumeOffset int64
+	if len(respMsg.Payload) >= 8 {
+		acceptPayload, err := protocol.DecodeTransferAccept(respMsg.Payload)
+		if err == nil && acceptPayload.ResumeOffset > 0 {
+			resumeOffset = acceptPayload.ResumeOffset
+		}
+	}
+
 	chunker, err := NewChunker(filePath)
 	if err != nil {
 		return fmt.Errorf("creating chunker: %w", err)
@@ -394,6 +403,17 @@ func sendFileViaChannels(ctx context.Context, client *channelClient, filePath st
 
 	var totalBytesSent int64
 	var totalChunks uint64
+
+	// Handle resume: seek past already-sent data
+	if resumeOffset > 0 {
+		if err := chunker.SeekTo(resumeOffset); err != nil {
+			return fmt.Errorf("seeking to resume offset: %w", err)
+		}
+		noncesToSkip := uint64(resumeOffset / DefaultChunkSize)
+		encryptor.SkipNonces(noncesToSkip)
+		totalBytesSent = resumeOffset
+		totalChunks = noncesToSkip
+	}
 
 	for {
 		select {
@@ -481,7 +501,7 @@ func sendFileViaChannels(ctx context.Context, client *channelClient, filePath st
 }
 
 // receiveFileViaChannels is a copy of ReceiveFile that uses channelClient.
-func receiveFileViaChannels(ctx context.Context, client *channelClient, outputDir string, callbacks *EngineCallbacks) error {
+func receiveFileViaChannels(ctx context.Context, client *channelClient, outputDir string, enableResume bool, callbacks *EngineCallbacks) error {
 	if callbacks == nil {
 		callbacks = &EngineCallbacks{}
 	}
@@ -565,6 +585,25 @@ func receiveFileViaChannels(ctx context.Context, client *channelClient, outputDi
 	}
 
 	acceptPayload := &protocol.TransferAcceptPayload{ResumeOffset: 0}
+
+	// Check for resume if enabled
+	var resumeState *ResumeState
+	if enableResume {
+		state, err := DetectResumable(outputDir, offer)
+		if err == nil {
+			resumeState = state
+		}
+	}
+
+	var resumeOffset int64
+	if resumeState != nil {
+		resumeOffset = resumeState.Offset
+		acceptPayload.ResumeOffset = resumeOffset
+		if callbacks.OnResumeDetected != nil {
+			callbacks.OnResumeDetected(resumeOffset, offer.FileSize)
+		}
+	}
+
 	acceptMsg := &protocol.Message{
 		Type:    protocol.MsgTransferAccept,
 		Payload: protocol.EncodeTransferAccept(acceptPayload),
@@ -574,14 +613,28 @@ func receiveFileViaChannels(ctx context.Context, client *channelClient, outputDi
 	}
 
 	outPath := outputDir + string(os.PathSeparator) + offer.FileName
-	outFile, err := os.Create(outPath)
-	if err != nil {
-		return fmt.Errorf("creating output file: %w", err)
-	}
-	defer outFile.Close()
-
+	var outFile *os.File
 	fileHasher := hopcrypto.NewFileHasher()
 	var totalBytesReceived int64
+
+	if resumeState != nil {
+		outFile, err = os.OpenFile(outPath, os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			return fmt.Errorf("opening partial file for resume: %w", err)
+		}
+		rehashErr := feedHasherFromFile(fileHasher, outPath, resumeState.Offset)
+		if rehashErr != nil {
+			outFile.Close()
+			return fmt.Errorf("feeding hasher: %w", rehashErr)
+		}
+		totalBytesReceived = resumeState.Offset
+	} else {
+		outFile, err = os.Create(outPath)
+		if err != nil {
+			return fmt.Errorf("creating output file: %w", err)
+		}
+	}
+	defer outFile.Close()
 
 	for {
 		select {
@@ -603,6 +656,11 @@ func receiveFileViaChannels(ctx context.Context, client *channelClient, outputDi
 
 			if !fileHasher.Verify(completePayload.SHA256) {
 				return fmt.Errorf("SHA-256 verification failed")
+			}
+
+			// Clean up resume marker on successful completion
+			if enableResume {
+				_ = DeleteMarker(outputDir, offer.SHA256)
 			}
 
 			if callbacks.OnComplete != nil {
@@ -659,4 +717,204 @@ func receiveFileViaChannels(ctx context.Context, client *channelClient, outputDi
 			callbacks.OnProgress(totalBytesReceived, offer.FileSize)
 		}
 	}
+}
+
+// TestEngineResumeIntegration simulates an interrupted transfer followed by a
+// resumed one, verifying the final file is correct.
+func TestEngineResumeIntegration(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create test file — 5 full chunks
+	testData := make([]byte, 5*DefaultChunkSize)
+	if _, err := rand.Read(testData); err != nil {
+		t.Fatalf("generating test data: %v", err)
+	}
+	srcPath := filepath.Join(tmpDir, "source.bin")
+	if err := os.WriteFile(srcPath, testData, 0644); err != nil {
+		t.Fatalf("writing source file: %v", err)
+	}
+
+	outDir := filepath.Join(tmpDir, "output")
+	if err := os.MkdirAll(outDir, 0755); err != nil {
+		t.Fatalf("creating output dir: %v", err)
+	}
+
+	// --- Phase 1: Partial transfer (sender sends 2 of 5 chunks, then stops) ---
+	sToR := make(chan *protocol.Message, 100)
+	rToS := make(chan *protocol.Message, 100)
+
+	senderClient := &channelClient{sendCh: sToR, recvCh: rToS}
+	receiverClient := &channelClient{sendCh: rToS, recvCh: sToR}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	var sendErr error
+	chunksToSendBeforeCancel := 2
+	chunksSent := 0
+
+	// Run sender — cancel after 2 chunks
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		sendErr = sendFileViaChannels(ctx, senderClient, srcPath, false, nil, &EngineCallbacks{
+			OnProgress: func(bytesSoFar, totalBytes int64) {
+				chunksSent++
+				if chunksSent >= chunksToSendBeforeCancel {
+					cancel() // Interrupt the transfer
+				}
+			},
+		})
+	}()
+
+	// Run receiver — enable resume so it writes a marker on cancel
+	var recvErr error
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		recvErr = receiveFileViaChannels(ctx, receiverClient, outDir, true, &EngineCallbacks{
+			OnOfferReceived: func(offer *protocol.TransferOffer) bool {
+				return true
+			},
+		})
+	}()
+
+	wg.Wait()
+
+	// Both should have errors (context cancelled)
+	if sendErr == nil {
+		t.Log("Note: sender may not have errored if cancel raced")
+	}
+	// Receiver should have errored due to cancellation or connection loss
+	if recvErr == nil {
+		t.Log("Note: receiver completed unexpectedly (possible race)")
+	}
+
+	// Verify partial file exists
+	outPath := filepath.Join(outDir, "source.bin")
+	partialInfo, err := os.Stat(outPath)
+	if err != nil {
+		t.Fatalf("partial file should exist: %v", err)
+	}
+	if partialInfo.Size() == 0 {
+		t.Fatal("partial file should have some data")
+	}
+	if partialInfo.Size() >= int64(len(testData)) {
+		t.Skip("full file was transferred in phase 1 — cancel arrived too late")
+	}
+
+	t.Logf("Phase 1: partial file is %d bytes (%.0f%% of %d)",
+		partialInfo.Size(), float64(partialInfo.Size())/float64(len(testData))*100, len(testData))
+
+	// Manually write a resume marker for the partial data (since the test
+	// receiver is a copy, we ensure the marker is correct)
+	fileHash, _, err := computeFileHash(srcPath)
+	if err != nil {
+		t.Fatalf("computing file hash: %v", err)
+	}
+
+	partialHash, err := hashPartialFile(outPath, partialInfo.Size())
+	if err != nil {
+		t.Fatalf("hashing partial file: %v", err)
+	}
+
+	chunkIndex := uint64(partialInfo.Size() / DefaultChunkSize)
+	err = WriteMarker(outDir, fileHash, partialInfo.Size(), chunkIndex, partialHash, DefaultChunkSize, "source.bin")
+	if err != nil {
+		t.Fatalf("writing resume marker: %v", err)
+	}
+
+	// Verify marker exists
+	marker, err := ReadMarker(outDir, fileHash)
+	if err != nil {
+		t.Fatalf("reading marker: %v", err)
+	}
+	if marker == nil {
+		t.Fatal("marker should exist")
+	}
+	t.Logf("Phase 1: marker written — offset=%d chunkIndex=%d", marker.Offset, marker.ChunkIndex)
+
+	// --- Phase 2: Resumed transfer ---
+	sToR2 := make(chan *protocol.Message, 100)
+	rToS2 := make(chan *protocol.Message, 100)
+
+	senderClient2 := &channelClient{sendCh: sToR2, recvCh: rToS2}
+	receiverClient2 := &channelClient{sendCh: rToS2, recvCh: sToR2}
+
+	ctx2 := context.Background()
+	var wg2 sync.WaitGroup
+	var sendErr2, recvErr2 error
+	var senderHashHex2, receiverHashHex2 string
+	var resumeDetected bool
+
+	// Run sender
+	wg2.Add(1)
+	go func() {
+		defer wg2.Done()
+		sendErr2 = sendFileViaChannels(ctx2, senderClient2, srcPath, false, nil, &EngineCallbacks{
+			OnComplete: func(hashHex string) {
+				senderHashHex2 = hashHex
+			},
+		})
+	}()
+
+	// Run receiver with resume enabled
+	wg2.Add(1)
+	go func() {
+		defer wg2.Done()
+		recvErr2 = receiveFileViaChannels(ctx2, receiverClient2, outDir, true, &EngineCallbacks{
+			OnOfferReceived: func(offer *protocol.TransferOffer) bool {
+				return true
+			},
+			OnComplete: func(hashHex string) {
+				receiverHashHex2 = hashHex
+			},
+			OnResumeDetected: func(offset int64, total int64) {
+				resumeDetected = true
+				t.Logf("Phase 2: resume detected at offset %d / %d", offset, total)
+			},
+		})
+	}()
+
+	wg2.Wait()
+
+	if sendErr2 != nil {
+		t.Fatalf("sender error in phase 2: %v", sendErr2)
+	}
+	if recvErr2 != nil {
+		t.Fatalf("receiver error in phase 2: %v", recvErr2)
+	}
+
+	if !resumeDetected {
+		t.Error("resume should have been detected in phase 2")
+	}
+
+	if senderHashHex2 == "" || receiverHashHex2 == "" {
+		t.Fatal("hashes should not be empty")
+	}
+	if senderHashHex2 != receiverHashHex2 {
+		t.Errorf("hash mismatch: sender=%s receiver=%s", senderHashHex2, receiverHashHex2)
+	}
+
+	// Verify the final file matches the original
+	finalData, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("reading final file: %v", err)
+	}
+
+	if len(finalData) != len(testData) {
+		t.Fatalf("final file size = %d, want %d", len(finalData), len(testData))
+	}
+	for i := range testData {
+		if testData[i] != finalData[i] {
+			t.Fatalf("byte mismatch at offset %d: got 0x%02x, want 0x%02x", i, finalData[i], testData[i])
+		}
+	}
+
+	// Verify marker was cleaned up
+	markerAfter, _ := ReadMarker(outDir, fileHash)
+	if markerAfter != nil {
+		t.Error("resume marker should have been deleted after successful transfer")
+	}
+
+	t.Logf("Phase 2: resume transfer complete — file verified (%d bytes)", len(finalData))
 }

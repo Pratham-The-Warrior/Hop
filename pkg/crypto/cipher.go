@@ -74,6 +74,22 @@ func (e *Encryptor) EncryptWithNonce(plaintext, nonce []byte) ([]byte, error) {
 	return ciphertext, nil
 }
 
+// SkipNonces advances the encryptor's nonce counter by n without encrypting.
+// This is used for transfer resume: the sender skips nonces for chunks that
+// were already successfully transmitted, keeping the nonce stream in sync.
+func (e *Encryptor) SkipNonces(n uint64) {
+	e.mu.Lock()
+	e.counter += n
+	e.mu.Unlock()
+}
+
+// Counter returns the current nonce counter value.
+func (e *Encryptor) Counter() uint64 {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.counter
+}
+
 // Decrypt decrypts ciphertext that was produced by Encrypt (nonce-prepended format).
 // Returns the original plaintext or an error if authentication fails.
 func (d *Decryptor) Decrypt(data []byte) ([]byte, error) {

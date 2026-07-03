@@ -29,7 +29,18 @@ type EngineCallbacks struct {
 
 	// OnError is called when the transfer fails.
 	OnError func(err error)
+
+	// OnResumeDetected is called when a resumable partial transfer is found.
+	// offset is the byte position to resume from, total is the full file size.
+	OnResumeDetected func(offset int64, total int64)
 }
+
+const (
+	// markerUpdateInterval controls how often the resume marker is updated
+	// during a transfer (in chunks). Lower values increase crash-recovery
+	// granularity but add more disk I/O.
+	markerUpdateInterval = 50
+)
 
 // SendFile orchestrates the full sender-side transfer:
 //
@@ -140,6 +151,15 @@ func SendFile(ctx context.Context, transport Transport, filePath string, compres
 		return fmt.Errorf("unexpected message type: %s (expected ACCEPT or REJECT)", respMsg.Type)
 	}
 
+	// Parse resume offset from TRANSFER_ACCEPT
+	var resumeOffset int64
+	if len(respMsg.Payload) >= 8 {
+		acceptPayload, err := protocol.DecodeTransferAccept(respMsg.Payload)
+		if err == nil && acceptPayload.ResumeOffset > 0 {
+			resumeOffset = acceptPayload.ResumeOffset
+		}
+	}
+
 	// --- Step 4: Stream encrypted chunks ---
 	chunker, err := NewChunker(filePath)
 	if err != nil {
@@ -149,6 +169,22 @@ func SendFile(ctx context.Context, transport Transport, filePath string, compres
 
 	var totalBytesSent int64
 	var totalChunks uint64
+
+	// Handle resume: seek past already-sent data
+	if resumeOffset > 0 {
+		if err := chunker.SeekTo(resumeOffset); err != nil {
+			return fmt.Errorf("seeking to resume offset %d: %w", resumeOffset, err)
+		}
+		// Skip encryptor nonces for chunks already sent
+		noncesToSkip := uint64(resumeOffset / DefaultChunkSize)
+		encryptor.SkipNonces(noncesToSkip)
+		totalBytesSent = resumeOffset
+		totalChunks = noncesToSkip
+
+		if callbacks.OnResumeDetected != nil {
+			callbacks.OnResumeDetected(resumeOffset, fileInfo.Size())
+		}
+	}
 
 	for {
 		select {
@@ -251,7 +287,7 @@ func SendFile(ctx context.Context, transport Transport, filePath string, compres
 //  2. Receive TRANSFER_OFFER and present to user for acceptance
 //  3. Receive encrypted chunks, decrypt, verify CRC-32, write to disk
 //  4. Verify final SHA-256 hash
-func ReceiveFile(ctx context.Context, transport Transport, outputDir string, callbacks *EngineCallbacks) error {
+func ReceiveFile(ctx context.Context, transport Transport, outputDir string, enableResume bool, callbacks *EngineCallbacks) error {
 	if callbacks == nil {
 		callbacks = &EngineCallbacks{}
 	}
@@ -342,8 +378,28 @@ func ReceiveFile(ctx context.Context, transport Transport, outputDir string, cal
 		return fmt.Errorf("transfer rejected by user")
 	}
 
-	// Send TRANSFER_ACCEPT
-	acceptPayload := &protocol.TransferAcceptPayload{ResumeOffset: 0}
+	// --- Resume detection ---
+	var resumeState *ResumeState
+	if enableResume {
+		state, err := DetectResumable(outputDir, offer)
+		if err != nil {
+			// Non-fatal: log and start fresh
+			resumeState = nil
+		} else {
+			resumeState = state
+		}
+	}
+
+	var resumeOffset int64
+	if resumeState != nil {
+		resumeOffset = resumeState.Offset
+		if callbacks.OnResumeDetected != nil {
+			callbacks.OnResumeDetected(resumeOffset, offer.FileSize)
+		}
+	}
+
+	// Send TRANSFER_ACCEPT with resume offset
+	acceptPayload := &protocol.TransferAcceptPayload{ResumeOffset: resumeOffset}
 	acceptMsg := &protocol.Message{
 		Type:    protocol.MsgTransferAccept,
 		Payload: protocol.EncodeTransferAccept(acceptPayload),
@@ -354,26 +410,55 @@ func ReceiveFile(ctx context.Context, transport Transport, outputDir string, cal
 
 	// --- Step 3: Receive chunks ---
 	outPath := outputDir + string(os.PathSeparator) + offer.FileName
-	outFile, err := os.Create(outPath)
-	if err != nil {
-		return fmt.Errorf("creating output file '%s': %w", outPath, err)
-	}
-	defer outFile.Close()
-
+	var outFile *os.File
 	fileHasher := hopcrypto.NewFileHasher()
 	var totalBytesReceived int64
+
+	if resumeState != nil {
+		// Append mode: open existing partial file
+		outFile, err = os.OpenFile(outPath, os.O_WRONLY|os.O_APPEND, 0644)
+		if err != nil {
+			return fmt.Errorf("opening partial file for resume '%s': %w", outPath, err)
+		}
+
+		// Re-feed existing data into the streaming SHA-256 hasher so the
+		// final full-file hash is computed correctly. The partial hash was
+		// already verified inside DetectResumable, so we don't need to
+		// check it again here.
+		if rehashErr := feedHasherFromFile(fileHasher, outPath, resumeState.Offset); rehashErr != nil {
+			outFile.Close()
+			return fmt.Errorf("feeding hasher from partial file: %w", rehashErr)
+		}
+
+		totalBytesReceived = resumeState.Offset
+	} else {
+		// Fresh transfer: create new file
+		outFile, err = os.Create(outPath)
+		if err != nil {
+			return fmt.Errorf("creating output file '%s': %w", outPath, err)
+		}
+	}
+	defer outFile.Close()
 
 	for {
 		select {
 		case <-ctx.Done():
 			rejectMsg := &protocol.Message{Type: protocol.MsgTransferCancel}
 			_ = transport.Send(context.Background(), rejectMsg)
+			// Write marker so we can resume later
+			if enableResume {
+				writeResumeMarkerSafe(outputDir, offer, totalBytesReceived, fileHasher)
+			}
 			return ctx.Err()
 		default:
 		}
 
 		msg, err := transport.Receive(ctx)
 		if err != nil {
+			// Write marker so we can resume after connection error
+			if enableResume {
+				writeResumeMarkerSafe(outputDir, offer, totalBytesReceived, fileHasher)
+			}
 			return fmt.Errorf("receiving data: %w", err)
 		}
 
@@ -389,6 +474,11 @@ func ReceiveFile(ctx context.Context, transport Transport, outputDir string, cal
 				return fmt.Errorf("SHA-256 verification failed: file may be corrupted")
 			}
 
+			// Clean up resume marker on successful completion
+			if enableResume {
+				_ = DeleteMarker(outputDir, offer.SHA256)
+			}
+
 			if callbacks.OnComplete != nil {
 				callbacks.OnComplete(fileHasher.SumHex())
 			}
@@ -397,6 +487,9 @@ func ReceiveFile(ctx context.Context, transport Transport, outputDir string, cal
 
 		// Handle TRANSFER_CANCEL
 		if msg.Type == protocol.MsgTransferCancel {
+			if enableResume {
+				writeResumeMarkerSafe(outputDir, offer, totalBytesReceived, fileHasher)
+			}
 			return fmt.Errorf("transfer cancelled by sender")
 		}
 
@@ -431,6 +524,10 @@ func ReceiveFile(ctx context.Context, transport Transport, outputDir string, cal
 		// Write to disk
 		n, err := outFile.Write(plaintext)
 		if err != nil {
+			// Write marker before returning error so we can resume
+			if enableResume {
+				writeResumeMarkerSafe(outputDir, offer, totalBytesReceived, fileHasher)
+			}
 			return fmt.Errorf("writing chunk %d to disk: %w", chunkHdr.Index, err)
 		}
 
@@ -439,12 +536,21 @@ func ReceiveFile(ctx context.Context, transport Transport, outputDir string, cal
 
 		totalBytesReceived += int64(n)
 
+		// Update resume marker periodically
+		if enableResume && chunkHdr.Index > 0 && chunkHdr.Index%markerUpdateInterval == 0 {
+			writeResumeMarkerSafe(outputDir, offer, totalBytesReceived, fileHasher)
+		}
+
 		// Send CHUNK_ACK
 		chunkAck := &protocol.Message{
 			Type:    protocol.MsgChunkAck,
 			Payload: protocol.EncodeChunkHeader(chunkHdr),
 		}
 		if err := transport.Send(ctx, chunkAck); err != nil {
+			// Write marker before returning
+			if enableResume {
+				writeResumeMarkerSafe(outputDir, offer, totalBytesReceived, fileHasher)
+			}
 			return fmt.Errorf("sending CHUNK_ACK for chunk %d: %w", chunkHdr.Index, err)
 		}
 
@@ -484,4 +590,46 @@ func computeFileHash(filePath string) ([32]byte, os.FileInfo, error) {
 	}
 
 	return hasher.Sum(), info, nil
+}
+
+// feedHasherFromFile reads a file up to `length` bytes and feeds the data into
+// the given FileHasher. This is used during resume to rebuild the streaming
+// SHA-256 state from the existing partial file.
+func feedHasherFromFile(hasher *hopcrypto.FileHasher, path string, length int64) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("opening file: %w", err)
+	}
+	defer f.Close()
+
+	buf := make([]byte, DefaultChunkSize)
+	var fed int64
+
+	for fed < length {
+		toRead := int64(len(buf))
+		if toRead > length-fed {
+			toRead = length - fed
+		}
+
+		n, err := f.Read(buf[:toRead])
+		if err != nil && err != io.EOF {
+			return fmt.Errorf("reading file at offset %d: %w", fed, err)
+		}
+		if n == 0 {
+			break
+		}
+
+		hasher.Write(buf[:n])
+		fed += int64(n)
+	}
+
+	return nil
+}
+
+// writeResumeMarkerSafe writes a resume marker, ignoring errors.
+// Used in error paths where we want best-effort persistence.
+func writeResumeMarkerSafe(dir string, offer *protocol.TransferOffer, bytesReceived int64, hasher *hopcrypto.FileHasher) {
+	partialHash := hasher.Sum()
+	chunkIndex := uint64(bytesReceived / DefaultChunkSize)
+	_ = WriteMarker(dir, offer.SHA256, bytesReceived, chunkIndex, partialHash, offer.ChunkSize, offer.FileName)
 }
