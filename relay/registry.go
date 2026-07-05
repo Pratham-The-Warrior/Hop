@@ -24,6 +24,7 @@ type RegistryEntry struct {
 	ExpiresAt   time.Time         // 24h automatic expiry
 	Paired      chan struct{}      // Closed when receiver joins (signals sender)
 	Done        chan struct{}      // Closed when transfer completes or is cancelled
+	BrowserMode bool              // When true, token stays active for multiple browser downloads
 }
 
 // NewRegistry creates a new token registry with background expiry cleanup.
@@ -80,6 +81,7 @@ func (r *Registry) Lookup(token string) *RegistryEntry {
 
 // Join associates a receiver with an existing token entry.
 // Returns an error if the token doesn't exist or already has a receiver.
+// In BrowserMode, the receiver field is allowed to be replaced for subsequent downloads.
 func (r *Registry) Join(token string, receiver *BridgeConn) (*RegistryEntry, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -94,7 +96,8 @@ func (r *Registry) Join(token string, receiver *BridgeConn) (*RegistryEntry, err
 		return nil, fmt.Errorf("token %q has expired", token)
 	}
 
-	if entry.Receiver != nil {
+	// In browser mode, allow re-joining (previous browser download may have finished)
+	if entry.Receiver != nil && !entry.BrowserMode {
 		return nil, fmt.Errorf("token %q already has a receiver", token)
 	}
 
@@ -109,6 +112,34 @@ func (r *Registry) Join(token string, receiver *BridgeConn) (*RegistryEntry, err
 	}
 
 	return entry, nil
+}
+
+// SetBrowserMode marks a token entry for browser bridge mode.
+// In this mode, the token stays active after the first download, allowing
+// multiple browser receivers until the sender disconnects.
+func (r *Registry) SetBrowserMode(token string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if entry, exists := r.entries[token]; exists {
+		entry.BrowserMode = true
+	}
+}
+
+// GetSender returns the sender's BridgeConn for a given token.
+// Used by the browser bridge to communicate with the sender.
+func (r *Registry) GetSender(token string) *BridgeConn {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	entry, exists := r.entries[token]
+	if !exists {
+		return nil
+	}
+	if time.Now().After(entry.ExpiresAt) {
+		return nil
+	}
+	return entry.Sender
 }
 
 // Unregister removes a token from the registry and signals completion.

@@ -1,7 +1,7 @@
 # Hop — Project Status
 
-> **Last updated:** 2026-07-03  
-> **Current milestone:** 8 of 12 complete  
+> **Last updated:** 2026-07-05  
+> **Current milestone:** 9 of 12 complete  
 > **Branch:** `master`
 
 ---
@@ -84,6 +84,20 @@ All Cobra commands are wired and functional:
 - `cmd/get.go` — `--resume` flag wired into engine with resume progress display
 - `cmd/share.go` — `OnResumeDetected` callback for sender-side resume notification
 
+### Milestone 9 — Browser Bridge HTTP Server
+- `relay/browser.go` — BrowserBridge handler (HTML download page + file streaming to browser)
+- `relay/routes.go` — Token-aware HTTP routing (distinguishes API routes from transfer tokens)
+- `relay/server.go` — Integrated BrowserBridge + TokenRouter into relay server
+- `relay/registry.go` — BrowserMode for multi-receiver token support
+- `relay/bridge.go` — Auto-enable browser mode on token registration
+- `pkg/protocol/browser.go` — `BrowserInfoResponse` payload + encode/decode
+- `pkg/protocol/message.go` — 4 new message types: `BROWSER_INFO_REQ/RESP`, `BROWSER_DOWNLOAD_START/CANCEL`
+- `pkg/transfer/engine.go` — `SendFileBrowserMode()` for serving browser downloads (plaintext chunks, no E2E encryption)
+- `cmd/share.go` — Dual-mode sender: auto-detects CLI vs browser receiver and routes accordingly
+- Browser download page: styled dark-mode HTML with file metadata, SHA-256 preview, and download button
+- Abuse prevention: rate limiting, bandwidth cap (10 GB), connection limits all enforced for browser downloads
+- No disk writes: all data flows through memory buffers only on the relay
+
 **Tests:** 85 passing (crypto: 10, token: 5, protocol: 12, transfer engine: 6, transfer resume: 11, transfer misc: 11, relay server: 21, relay client: 7, build: 2)  
 **Static analysis:** `go vet` clean
 
@@ -93,7 +107,6 @@ All Cobra commands are wired and functional:
 
 | # | Milestone | What it covers |
 |---|-----------|---------------|
-| 9 | **Browser Bridge** | HTTPS relay for browser downloads, abuse prevention controls |
 | 10 | **Full Tunnel Suite** | HTTPS termination, request replay inspector (buffer + body caps), password protection (bcrypt) |
 | 11 | **Directory + Compression** | tar.gz packaging, zstd streaming compression (`--compress`), bandwidth throttling (`--limit`) |
 | 12 | **Polish & DX** | Shell completions wiring, transfer history integration, `hop version` update check, graceful shutdown, final E2E tests |
@@ -112,8 +125,8 @@ hop/
 │   ├── config/       # Relay URL and env configuration
 │   ├── crypto/       # X25519, ChaCha20, CRC-32, SHA-256
 │   ├── token/        # Transfer token generation
-│   ├── transfer/     # File chunker, rate limiter, transfer engine, resume markers
-│   ├── protocol/     # Wire format, versioning, handshake, resume, LAN discovery
+│   ├── transfer/     # File chunker, rate limiter, transfer engine, resume markers, browser mode
+│   ├── protocol/     # Wire format, versioning, handshake, resume, LAN discovery, browser bridge
 │   ├── network/      # LAN discovery, P2P hole punch, TCP/UDP transports
 │   ├── relay/        # Relay client library
 │   ├── tui/          # Terminal UI (progress, tunnel, QR)
@@ -122,8 +135,10 @@ hop/
     ├── main.go       # Entry point (--addr, --tls flags)
     ├── server.go     # HTTP server + middleware
     ├── auth.go       # Ed25519 + JWT session auth
-    ├── registry.go   # Token → session mapping
+    ├── registry.go   # Token → session mapping (with browser mode)
     ├── bridge.go     # WebSocket data bridge
+    ├── browser.go    # Browser bridge (download page + file streaming)
+    ├── routes.go     # Token-aware HTTP routing
     ├── signal.go     # WebSocket signaling for P2P hole punch
     └── ratelimit.go  # Per-IP abuse prevention
 ```
@@ -132,11 +147,11 @@ hop/
 
 ## 🚀 Where to Start Next
 
-**Begin with Milestone 9: Browser Bridge.**
+**Begin with Milestone 10: Full Tunnel Suite.**
 
-1. Add an HTTPS download endpoint to the relay server.
-2. Implement abuse prevention controls (rate limiting, token validation).
-3. Allow receivers to download files via browser using the `hop.to` link.
-4. Maintain end-to-end encryption for CLI-to-CLI; browser bridge uses TLS only.
+1. Implement HTTPS termination on the relay for `hop http <port>` tunnels.
+2. Build the request replay inspector with configurable buffer depth and body size caps.
+3. Add the `--password` flag with bcrypt hashing for tunnel access protection.
+4. Wire the tunnel monitor TUI to show live request logs.
 
-Milestone 8 is complete — interrupted transfers can now resume from the last successfully received chunk using `.hop-resume-*` marker files.
+Milestone 9 is complete — browsers can now download shared files via the `hop.to` link with a styled download page, file metadata preview, and streaming delivery.

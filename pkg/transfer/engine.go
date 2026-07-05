@@ -33,6 +33,9 @@ type EngineCallbacks struct {
 	// OnResumeDetected is called when a resumable partial transfer is found.
 	// offset is the byte position to resume from, total is the full file size.
 	OnResumeDetected func(offset int64, total int64)
+
+	// OnBrowserDownload is called when a browser download begins.
+	OnBrowserDownload func()
 }
 
 const (
@@ -632,4 +635,202 @@ func writeResumeMarkerSafe(dir string, offer *protocol.TransferOffer, bytesRecei
 	partialHash := hasher.Sum()
 	chunkIndex := uint64(bytesReceived / DefaultChunkSize)
 	_ = WriteMarker(dir, offer.SHA256, bytesReceived, chunkIndex, partialHash, offer.ChunkSize, offer.FileName)
+}
+
+// SendFileBrowserMode handles the sender side of a browser bridge download.
+// Unlike SendFile, this does NOT use E2E encryption — the relay handles TLS
+// to the browser. Chunks are sent in plaintext with CRC-32 integrity.
+//
+// The flow is:
+//  1. Wait for BROWSER_INFO_REQ → respond with file metadata
+//  2. Wait for BROWSER_DOWNLOAD_START → stream plaintext chunks
+//  3. Send TRANSFER_COMPLETE with SHA-256 hash
+//  4. Loop: wait for more browser requests until cancelled
+//
+// This function blocks until the context is cancelled (sender Ctrl+C).
+func SendFileBrowserMode(ctx context.Context, transport Transport, filePath string, limiter *TokenBucketLimiter, callbacks *EngineCallbacks) error {
+	if callbacks == nil {
+		callbacks = &EngineCallbacks{}
+	}
+
+	// Pre-compute file SHA-256
+	fileHash, fileInfo, err := computeFileHash(filePath)
+	if err != nil {
+		return fmt.Errorf("computing file hash: %w", err)
+	}
+
+	// Main loop: serve browser requests until sender disconnects
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		// Wait for a message from the relay
+		msg, err := transport.Receive(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return fmt.Errorf("receiving browser bridge message: %w", err)
+		}
+
+		switch msg.Type {
+		case protocol.MsgBrowserInfoReq:
+			// Respond with file metadata
+			info := &protocol.BrowserInfoResponse{
+				FileName:  fileInfo.Name(),
+				FileSize:  fileInfo.Size(),
+				SHA256:    fileHash,
+				ChunkSize: DefaultChunkSize,
+			}
+			resp := &protocol.Message{
+				Type:    protocol.MsgBrowserInfoResp,
+				Payload: protocol.EncodeBrowserInfoResponse(info),
+			}
+			if err := transport.Send(ctx, resp); err != nil {
+				return fmt.Errorf("sending browser info response: %w", err)
+			}
+
+		case protocol.MsgBrowserDownloadStart:
+			// A browser download has begun — stream the file
+			if callbacks.OnBrowserDownload != nil {
+				callbacks.OnBrowserDownload()
+			}
+
+			err := sendFileToBrowser(ctx, transport, filePath, fileHash, fileInfo, limiter, callbacks)
+			if err != nil {
+				if callbacks.OnError != nil {
+					callbacks.OnError(err)
+				}
+				// Don't return — allow more downloads. Only fatal errors
+				// (like ctx cancellation) should exit the loop.
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+			}
+
+		case protocol.MsgHopHello:
+			// This is a CLI-to-CLI transfer — return a sentinel error
+			// so the caller can switch to the regular SendFile path.
+			return ErrCLIReceiverDetected{Msg: msg}
+
+		default:
+			// Unexpected message type — log and continue
+			continue
+		}
+	}
+}
+
+// ErrCLIReceiverDetected is returned by SendFileBrowserMode when a CLI receiver
+// connects instead of a browser. The caller should switch to the regular
+// SendFile path using the contained HOP_HELLO message.
+type ErrCLIReceiverDetected struct {
+	Msg *protocol.Message // The HOP_HELLO message from the CLI receiver
+}
+
+func (e ErrCLIReceiverDetected) Error() string {
+	return "CLI receiver detected — switch to SendFile"
+}
+
+// sendFileToBrowser streams a single file to a browser via the relay.
+// Sends plaintext chunks with CRC-32 integrity (no encryption).
+func sendFileToBrowser(ctx context.Context, transport Transport, filePath string, fileHash [32]byte, fileInfo os.FileInfo, limiter *TokenBucketLimiter, callbacks *EngineCallbacks) error {
+	chunker, err := NewChunker(filePath)
+	if err != nil {
+		return fmt.Errorf("creating chunker: %w", err)
+	}
+	defer chunker.Close()
+
+	var totalBytesSent int64
+
+	for {
+		select {
+		case <-ctx.Done():
+			cancelMsg := &protocol.Message{Type: protocol.MsgTransferCancel}
+			_ = transport.Send(context.Background(), cancelMsg)
+			return ctx.Err()
+		default:
+		}
+
+		chunk, err := chunker.NextChunk()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("reading chunk: %w", err)
+		}
+
+		chunkData := CopyChunkData(chunk)
+
+		// Apply rate limiting
+		if limiter != nil {
+			limiter.Wait(chunk.Size)
+		}
+
+		// Compute CRC-32 (integrity check)
+		crc := hopcrypto.ChunkCRC32(chunkData)
+
+		// Build chunk message: [ChunkHeader][plaintext data]
+		// No encryption for browser mode — TLS handles security.
+		hdr := &protocol.ChunkHeader{
+			Index: chunk.Index,
+			Size:  uint32(chunk.Size),
+			CRC32: crc,
+		}
+		hdrBytes := protocol.EncodeChunkHeader(hdr)
+		payload := make([]byte, len(hdrBytes)+len(chunkData))
+		copy(payload, hdrBytes)
+		copy(payload[len(hdrBytes):], chunkData)
+
+		chunkMsg := &protocol.Message{
+			Type:    protocol.MsgChunkData,
+			Payload: payload,
+		}
+		if err := transport.Send(ctx, chunkMsg); err != nil {
+			return fmt.Errorf("sending chunk %d: %w", chunk.Index, err)
+		}
+
+		// Wait for ACK (stop-and-wait)
+		ackMsg, err := transport.Receive(ctx)
+		if err != nil {
+			return fmt.Errorf("waiting for chunk %d ACK: %w", chunk.Index, err)
+		}
+
+		if ackMsg.Type == protocol.MsgBrowserDownloadCancel {
+			return fmt.Errorf("browser download cancelled")
+		}
+		if ackMsg.Type == protocol.MsgTransferCancel {
+			return fmt.Errorf("transfer cancelled by relay")
+		}
+		if ackMsg.Type != protocol.MsgChunkAck {
+			return fmt.Errorf("expected CHUNK_ACK, got %s", ackMsg.Type)
+		}
+
+		totalBytesSent += int64(chunk.Size)
+
+		if callbacks.OnProgress != nil {
+			callbacks.OnProgress(totalBytesSent, fileInfo.Size())
+		}
+	}
+
+	// Send TRANSFER_COMPLETE
+	complete := &protocol.TransferCompletePayload{
+		SHA256:     fileHash,
+		TotalBytes: uint64(totalBytesSent),
+	}
+	completeMsg := &protocol.Message{
+		Type:    protocol.MsgTransferComplete,
+		Payload: protocol.EncodeTransferComplete(complete),
+	}
+	if err := transport.Send(ctx, completeMsg); err != nil {
+		return fmt.Errorf("sending TRANSFER_COMPLETE: %w", err)
+	}
+
+	if callbacks.OnComplete != nil {
+		callbacks.OnComplete(fmt.Sprintf("%x", fileHash))
+	}
+
+	return nil
 }

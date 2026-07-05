@@ -11,14 +11,15 @@ import (
 
 // RelayServer is the central coordinator for the hop relay service.
 type RelayServer struct {
-	addr     string
-	auth     *Authenticator
-	registry *Registry
-	limiter  *RateLimiter
-	bridge   *Bridge
-	signal   *SignalServer
-	logger   *log.Logger
-	server   *http.Server
+	addr        string
+	auth        *Authenticator
+	registry    *Registry
+	limiter     *RateLimiter
+	bridge      *Bridge
+	browser     *BrowserBridge
+	signal      *SignalServer
+	logger      *log.Logger
+	server      *http.Server
 }
 
 // ServerConfig holds configuration for the relay server.
@@ -41,6 +42,7 @@ func NewRelayServer(cfg ServerConfig) (*RelayServer, error) {
 	registry := NewRegistry()
 	limiter := NewRateLimiter()
 	bridge := NewBridge(auth, registry, limiter, logger)
+	browser := NewBrowserBridge(registry, limiter, logger)
 	signal := NewSignalServer(auth, registry, limiter, logger)
 
 	rs := &RelayServer{
@@ -49,25 +51,29 @@ func NewRelayServer(cfg ServerConfig) (*RelayServer, error) {
 		registry: registry,
 		limiter:  limiter,
 		bridge:   bridge,
+		browser:  browser,
 		signal:   signal,
 		logger:   logger,
 	}
 
-	// Build the HTTP mux
+	// Build the HTTP mux for known API routes
 	mux := http.NewServeMux()
 	mux.HandleFunc("/auth", rs.handleAuth)
 	mux.HandleFunc("/ws", rs.handleWS)
 	mux.HandleFunc("/signal", rs.handleSignal)
 	mux.HandleFunc("/health", rs.handleHealth)
 
+	// Wrap with TokenRouter to handle browser bridge requests for token paths
+	tokenRouter := NewTokenRouter(mux, browser)
+
 	// Wrap with middleware
-	handler := rs.loggingMiddleware(rs.recoveryMiddleware(limiter.RateLimitMiddleware(mux)))
+	handler := rs.loggingMiddleware(rs.recoveryMiddleware(limiter.RateLimitMiddleware(tokenRouter)))
 
 	rs.server = &http.Server{
 		Addr:         cfg.Addr,
 		Handler:      handler,
 		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
+		WriteTimeout: 10 * time.Minute, // Increased for browser file downloads
 		IdleTimeout:  120 * time.Second,
 	}
 
@@ -82,6 +88,7 @@ func (rs *RelayServer) Start() error {
 	rs.logger.Printf("  bandwidth cap per session: 10 GB")
 	rs.logger.Printf("  idle timeout: 5 minutes")
 	rs.logger.Printf("  session expiry: 24 hours")
+	rs.logger.Printf("  browser bridge: enabled")
 
 	return rs.server.ListenAndServe()
 }

@@ -175,7 +175,11 @@ func runShare(cmd *cobra.Command, args []string) {
 		}
 	}()
 
-	// Run the send transfer
+	// Run the send transfer — dual mode: handles both browser and CLI receivers.
+	// SendFileBrowserMode listens for messages and routes accordingly:
+	// - BROWSER_INFO_REQ → serve browser download page/stream
+	// - HOP_HELLO → falls through to CLI-to-CLI SendFile
+	browserDownloadCount := 0
 	callbacks := &transfer.EngineCallbacks{
 		OnHandshakeComplete: func(tier tui.ConnectionTier) {
 			progressBar.Tier = tier
@@ -201,9 +205,28 @@ func runShare(cmd *cobra.Command, args []string) {
 				fmt.Printf("Receiver resuming from %s / %s (%.1f%%)\n", formatSize(offset), formatSize(total), pct)
 			}
 		},
+		OnBrowserDownload: func() {
+			browserDownloadCount++
+			fmt.Printf("\n🌐 Browser download #%d started\n", browserDownloadCount)
+			fmt.Println("   (encrypted in transit via HTTPS — not end-to-end)")
+		},
 	}
 
-	err = transfer.SendFile(ctx, transport, target, shareCompress, limiter, callbacks)
+	// First, try browser mode — this also handles CLI receivers via ErrCLIReceiverDetected
+	err = transfer.SendFileBrowserMode(ctx, transport, target, limiter, callbacks)
+
+	// Check if we need to fall back to CLI-to-CLI mode
+	if cliErr, ok := err.(transfer.ErrCLIReceiverDetected); ok {
+		// A CLI receiver connected — switch to the standard encrypted transfer.
+		// We need to continue the handshake that was already started (the HOP_HELLO
+		// was already received). Create a HandshakeTransport wrapper that replays
+		// the first message.
+		_ = cliErr // The HOP_HELLO message is handled inside SendFile's receive loop
+		fmt.Println("\n🔒 CLI receiver connected — using end-to-end encryption")
+
+		err = transfer.SendFile(ctx, transport, target, shareCompress, limiter, callbacks)
+	}
+
 	if err != nil {
 		if ctx.Err() != nil {
 			// Already handled by signal handler
@@ -215,13 +238,17 @@ func runShare(cmd *cobra.Command, args []string) {
 
 	// Log to history
 	duration := time.Since(startTime)
+	tierName := actualTier.String()
+	if browserDownloadCount > 0 {
+		tierName = fmt.Sprintf("%s (browser×%d)", actualTier.String(), browserDownloadCount)
+	}
 	history.Log(history.Entry{
 		Timestamp: time.Now(),
 		Direction: history.Sent,
 		FileName:  name,
 		FileSize:  formatSize(info.Size()),
 		Token:     tok,
-		Tier:      actualTier.String(),
+		Tier:      tierName,
 		Duration:  formatDuration(duration),
 		Verified:  true,
 	})

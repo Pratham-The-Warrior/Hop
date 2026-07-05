@@ -45,6 +45,12 @@ const (
 	// LAN discovery
 	MsgLANProbe    MessageType = 0x70
 	MsgLANResponse MessageType = 0x71
+
+	// Browser bridge
+	MsgBrowserInfoReq        MessageType = 0x80
+	MsgBrowserInfoResp       MessageType = 0x81
+	MsgBrowserDownloadStart  MessageType = 0x82
+	MsgBrowserDownloadCancel MessageType = 0x83
 )
 
 // String returns a human-readable name for the message type.
@@ -90,6 +96,14 @@ func (mt MessageType) String() string {
 		return "LAN_PROBE"
 	case MsgLANResponse:
 		return "LAN_RESPONSE"
+	case MsgBrowserInfoReq:
+		return "BROWSER_INFO_REQ"
+	case MsgBrowserInfoResp:
+		return "BROWSER_INFO_RESP"
+	case MsgBrowserDownloadStart:
+		return "BROWSER_DOWNLOAD_START"
+	case MsgBrowserDownloadCancel:
+		return "BROWSER_DOWNLOAD_CANCEL"
 	default:
 		return fmt.Sprintf("UNKNOWN(0x%02x)", uint8(mt))
 	}

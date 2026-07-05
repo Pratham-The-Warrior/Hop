@@ -170,7 +170,11 @@ func (b *Bridge) handleRegister(ctx context.Context, sender *BridgeConn, token s
 		return
 	}
 
-	b.logger.Printf("[bridge] token %s registered by %s", token, sender.ip)
+	// Enable browser mode — all tokens support browser downloads via hop.to links.
+	// This allows the BrowserBridge to communicate with the sender via their WebSocket.
+	b.registry.SetBrowserMode(token)
+
+	b.logger.Printf("[bridge] token %s registered by %s (browser mode enabled)", token, sender.ip)
 	sendWSResponse(sender.conn, "ok", "token registered — waiting for receiver")
 
 	// Wait for a receiver to join, or for timeout/cancellation
