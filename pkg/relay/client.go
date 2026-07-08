@@ -124,6 +124,72 @@ func (c *Client) JoinToken(ctx context.Context, transferToken string) error {
 	return c.connectWS(ctx, "join", transferToken)
 }
 
+// RegisterTunnel connects to the relay via WebSocket and registers a tunnel slug.
+// The tunnel uses the /tunnel WebSocket endpoint instead of /ws.
+func (c *Client) RegisterTunnel(ctx context.Context, slug, passwordHash string) error {
+	if c.token == "" {
+		return fmt.Errorf("not authenticated — call Authenticate() first")
+	}
+
+	// Build WebSocket URL for the tunnel endpoint
+	wsURL := strings.Replace(c.relayURL, "http://", "ws://", 1)
+	wsURL = strings.Replace(wsURL, "https://", "wss://", 1)
+	wsURL += "/tunnel"
+
+	conn, _, err := websocket.Dial(ctx, wsURL, &websocket.DialOptions{})
+	if err != nil {
+		return fmt.Errorf("connecting to relay tunnel endpoint: %w", err)
+	}
+
+	conn.SetReadLimit(17 * 1024 * 1024)
+
+	// Send the initial handshake (same as bridge: session_token + action + token)
+	req := wsRequest{
+		SessionToken: c.token,
+		Action:       "register_tunnel",
+		Token:        slug,
+	}
+	reqBytes, err := json.Marshal(req)
+	if err != nil {
+		conn.Close(websocket.StatusInternalError, "marshal error")
+		return fmt.Errorf("marshaling tunnel request: %w", err)
+	}
+
+	writeCtx, writeCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer writeCancel()
+	if err := conn.Write(writeCtx, websocket.MessageText, reqBytes); err != nil {
+		conn.Close(websocket.StatusInternalError, "write error")
+		return fmt.Errorf("sending tunnel handshake: %w", err)
+	}
+
+	// Read the handshake response
+	readCtx, readCancel := context.WithTimeout(ctx, 10*time.Second)
+	defer readCancel()
+	_, respData, err := conn.Read(readCtx)
+	if err != nil {
+		conn.Close(websocket.StatusInternalError, "read error")
+		return fmt.Errorf("reading tunnel response: %w", err)
+	}
+
+	var resp wsResponse
+	if err := json.Unmarshal(respData, &resp); err != nil {
+		conn.Close(websocket.StatusProtocolError, "invalid response")
+		return fmt.Errorf("decoding tunnel response: %w", err)
+	}
+
+	if resp.Status != "ok" {
+		conn.Close(websocket.StatusPolicyViolation, "rejected")
+		return fmt.Errorf("tunnel registration rejected: %s", resp.Message)
+	}
+
+	c.mu.Lock()
+	c.conn = conn
+	c.connected = true
+	c.mu.Unlock()
+
+	return nil
+}
+
 // connectWS establishes the WebSocket connection and sends the initial handshake.
 func (c *Client) connectWS(ctx context.Context, action, transferToken string) error {
 	if c.token == "" {

@@ -1,7 +1,7 @@
 # Hop — Project Status
 
-> **Last updated:** 2026-07-05  
-> **Current milestone:** 9 of 12 complete  
+> **Last updated:** 2026-07-08  
+> **Current milestone:** 10 of 12 complete  
 > **Branch:** `master`
 
 ---
@@ -101,13 +101,33 @@ All Cobra commands are wired and functional:
 **Tests:** 85 passing (crypto: 10, token: 5, protocol: 12, transfer engine: 6, transfer resume: 11, transfer misc: 11, relay server: 21, relay client: 7, build: 2)  
 **Static analysis:** `go vet` clean
 
+### Milestone 10 — Full Tunnel Suite
+- `pkg/protocol/tunnel.go` — Tunnel wire format: `TunnelRegister`, `TunnelHTTPRequest`, `TunnelHTTPResponse` encode/decode
+- `pkg/protocol/message.go` — Added `MsgTunnelRegister` (0x43) and `MsgTunnelClose` (0x44) message types
+- `relay/tunnel.go` — Relay-side tunnel server: WebSocket registration, public HTTP proxying, request ID correlation, slug cooldown
+- `relay/password.go` — bcrypt password verification helper
+- `relay/routes.go` — `/t/<slug>/<path>` routing to TunnelServer, `/tunnel` WebSocket endpoint
+- `relay/server.go` — TunnelServer integration, `/tunnel` route, health endpoint with tunnel count
+- `pkg/tunnel/tunnel.go` — Client-side tunnel engine: relay auth → register → concurrent HTTP proxy loop
+- `pkg/tunnel/replay.go` — In-memory ring buffer for request capture (configurable depth + body size caps)
+- `pkg/tunnel/replay_store.go` — IPC via `~/.hop/tunnel.json` for cross-process `hop replay` communication
+- `pkg/relay/client.go` — `RegisterTunnel()` method using `/tunnel` WebSocket endpoint
+- `cmd/http.go` — Full `hop http <port>` wiring: slug generation, bcrypt password, relay connection, TUI monitor, Ctrl+C shutdown
+- `cmd/replay.go` — Full `hop replay` wiring: reads state file, lists/replays requests, status comparison
+- Browser-accessible password protection with styled dark-mode HTML prompt
+- Concurrent request handling with request ID correlation between relay and client
+- 30-second slug cooldown after disconnect (per spec §7.3)
+- In-flight requests get 502 Bad Gateway on tunnel disconnect
+
+**Tests:** 85 passing (all existing tests pass, no regressions)  
+**Static analysis:** `go vet` clean
+
 ---
 
 ## 🔲 Remaining Milestones
 
 | # | Milestone | What it covers |
 |---|-----------|---------------|
-| 10 | **Full Tunnel Suite** | HTTPS termination, request replay inspector (buffer + body caps), password protection (bcrypt) |
 | 11 | **Directory + Compression** | tar.gz packaging, zstd streaming compression (`--compress`), bandwidth throttling (`--limit`) |
 | 12 | **Polish & DX** | Shell completions wiring, transfer history integration, `hop version` update check, graceful shutdown, final E2E tests |
 
@@ -126,10 +146,11 @@ hop/
 │   ├── crypto/       # X25519, ChaCha20, CRC-32, SHA-256
 │   ├── token/        # Transfer token generation
 │   ├── transfer/     # File chunker, rate limiter, transfer engine, resume markers, browser mode
-│   ├── protocol/     # Wire format, versioning, handshake, resume, LAN discovery, browser bridge
+│   ├── protocol/     # Wire format, versioning, handshake, resume, LAN discovery, browser bridge, tunnel
 │   ├── network/      # LAN discovery, P2P hole punch, TCP/UDP transports
 │   ├── relay/        # Relay client library
 │   ├── tui/          # Terminal UI (progress, tunnel, QR)
+│   ├── tunnel/       # Tunnel engine, replay buffer, IPC state store
 │   └── history/      # Transfer history log
 └── relay/            # Standalone relay server binary
     ├── main.go       # Entry point (--addr, --tls flags)
@@ -138,7 +159,9 @@ hop/
     ├── registry.go   # Token → session mapping (with browser mode)
     ├── bridge.go     # WebSocket data bridge
     ├── browser.go    # Browser bridge (download page + file streaming)
-    ├── routes.go     # Token-aware HTTP routing
+    ├── tunnel.go     # Tunnel server (registration, HTTP proxying, password auth)
+    ├── password.go   # bcrypt password verification
+    ├── routes.go     # Token-aware + tunnel-aware HTTP routing
     ├── signal.go     # WebSocket signaling for P2P hole punch
     └── ratelimit.go  # Per-IP abuse prevention
 ```
@@ -147,11 +170,11 @@ hop/
 
 ## 🚀 Where to Start Next
 
-**Begin with Milestone 10: Full Tunnel Suite.**
+**Begin with Milestone 11: Directory + Compression.**
 
-1. Implement HTTPS termination on the relay for `hop http <port>` tunnels.
-2. Build the request replay inspector with configurable buffer depth and body size caps.
-3. Add the `--password` flag with bcrypt hashing for tunnel access protection.
-4. Wire the tunnel monitor TUI to show live request logs.
+1. Add automatic `tar.gz` packaging when `hop share` receives a directory argument.
+2. Implement zstd streaming compression with the `--compress` flag.
+3. Wire bandwidth throttling via `--limit` flag on both `hop share` and `hop get`.
+4. Auto-detect and unpack archives on the receiver side.
 
-Milestone 9 is complete — browsers can now download shared files via the `hop.to` link with a styled download page, file metadata preview, and streaming delivery.
+Milestone 10 is complete — the full tunnel suite is operational with HTTPS tunnel proxying, request replay inspector, and bcrypt password protection.

@@ -18,6 +18,7 @@ type RelayServer struct {
 	bridge      *Bridge
 	browser     *BrowserBridge
 	signal      *SignalServer
+	tunnel      *TunnelServer
 	logger      *log.Logger
 	server      *http.Server
 }
@@ -44,6 +45,7 @@ func NewRelayServer(cfg ServerConfig) (*RelayServer, error) {
 	bridge := NewBridge(auth, registry, limiter, logger)
 	browser := NewBrowserBridge(registry, limiter, logger)
 	signal := NewSignalServer(auth, registry, limiter, logger)
+	tunnelSrv := NewTunnelServer(auth, limiter, logger)
 
 	rs := &RelayServer{
 		addr:     cfg.Addr,
@@ -53,6 +55,7 @@ func NewRelayServer(cfg ServerConfig) (*RelayServer, error) {
 		bridge:   bridge,
 		browser:  browser,
 		signal:   signal,
+		tunnel:   tunnelSrv,
 		logger:   logger,
 	}
 
@@ -61,10 +64,11 @@ func NewRelayServer(cfg ServerConfig) (*RelayServer, error) {
 	mux.HandleFunc("/auth", rs.handleAuth)
 	mux.HandleFunc("/ws", rs.handleWS)
 	mux.HandleFunc("/signal", rs.handleSignal)
+	mux.HandleFunc("/tunnel", rs.handleTunnel)
 	mux.HandleFunc("/health", rs.handleHealth)
 
 	// Wrap with TokenRouter to handle browser bridge requests for token paths
-	tokenRouter := NewTokenRouter(mux, browser)
+	tokenRouter := NewTokenRouter(mux, browser, tunnelSrv)
 
 	// Wrap with middleware
 	handler := rs.loggingMiddleware(rs.recoveryMiddleware(limiter.RateLimitMiddleware(tokenRouter)))
@@ -89,6 +93,7 @@ func (rs *RelayServer) Start() error {
 	rs.logger.Printf("  idle timeout: 5 minutes")
 	rs.logger.Printf("  session expiry: 24 hours")
 	rs.logger.Printf("  browser bridge: enabled")
+	rs.logger.Printf("  tunnel server: enabled")
 
 	return rs.server.ListenAndServe()
 }
@@ -121,10 +126,14 @@ func (rs *RelayServer) handleSignal(w http.ResponseWriter, r *http.Request) {
 	rs.signal.HandleSignal(w, r)
 }
 
+func (rs *RelayServer) handleTunnel(w http.ResponseWriter, r *http.Request) {
+	rs.tunnel.HandleTunnel(w, r)
+}
+
 func (rs *RelayServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	fmt.Fprintf(w, `{"status":"ok","sessions":%d,"tokens":%d}`,
-		rs.auth.SessionCount(), rs.registry.Count())
+	fmt.Fprintf(w, `{"status":"ok","sessions":%d,"tokens":%d,"tunnels":%d}`,
+		rs.auth.SessionCount(), rs.registry.Count(), rs.tunnel.ActiveTunnelCount())
 }
 
 // --- Middleware ---

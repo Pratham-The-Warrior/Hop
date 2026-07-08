@@ -33,6 +33,8 @@ const (
 	MsgTunnelRequest  MessageType = 0x40
 	MsgTunnelResponse MessageType = 0x41
 	MsgTunnelData     MessageType = 0x42
+	MsgTunnelRegister MessageType = 0x43
+	MsgTunnelClose    MessageType = 0x44
 
 	// Session
 	MsgSessionAuth    MessageType = 0x50
@@ -84,6 +86,10 @@ func (mt MessageType) String() string {
 		return "TUNNEL_RESPONSE"
 	case MsgTunnelData:
 		return "TUNNEL_DATA"
+	case MsgTunnelRegister:
+		return "TUNNEL_REGISTER"
+	case MsgTunnelClose:
+		return "TUNNEL_CLOSE"
 	case MsgSessionAuth:
 		return "SESSION_AUTH"
 	case MsgSessionToken:

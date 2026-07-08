@@ -1,18 +1,26 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"time"
 
+	"golang.org/x/crypto/bcrypt"
+
+	"github.com/prathmeshsarda/hop/pkg/config"
+	"github.com/prathmeshsarda/hop/pkg/token"
 	"github.com/prathmeshsarda/hop/pkg/tui"
+	"github.com/prathmeshsarda/hop/pkg/tunnel"
 	"github.com/spf13/cobra"
 )
 
 var (
-	httpPassword     string
-	httpReplayBuffer int
+	httpPassword      string
+	httpReplayBuffer  int
 	httpReplayMaxBody string
 )
 
@@ -34,39 +42,143 @@ func runHTTP(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
-	// Generate tunnel slug
-	slug := fmt.Sprintf("t/%s", "bright-moon-7") // Mock for now
-	publicURL := fmt.Sprintf("https://hop.to/%s", slug)
+	// Generate tunnel slug using the token generator
+	slug := token.Generate()
 
-	// Render tunnel monitor UI
-	renderer := tui.NewRenderer()
+	// Parse max body size
+	maxBody := parseBodySize(httpReplayMaxBody)
 
-	var lines []string
-	lines = append(lines, "hop")
-	lines = append(lines, strings.Repeat("─", 50))
-	lines = append(lines, fmt.Sprintf("tunneling localhost:%d", port))
-	lines = append(lines, fmt.Sprintf("Public URL: %s", publicURL))
-	lines = append(lines, "Status: ⏳ Connecting...")
-	lines = append(lines, "")
-	lines = append(lines, "Active Pipes: 0    |    Total Requests: 0")
-	lines = append(lines, fmt.Sprintf("Replay Buffer: 0/%d requests captured", httpReplayBuffer))
-
+	// Hash password with bcrypt if provided
+	var passwordHash string
 	if httpPassword != "" {
-		lines = append(lines, "Password Protection: ✓ Enabled")
+		hash, err := bcrypt.GenerateFromPassword([]byte(httpPassword), bcrypt.DefaultCost)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: failed to hash password: %v\n", err)
+			os.Exit(1)
+		}
+		passwordHash = string(hash)
 	}
 
-	lines = append(lines, strings.Repeat("─", 50))
+	// Set up context with Ctrl+C handling
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	// Print QR code for the tunnel URL
-	qrLines := tui.RenderQR(publicURL)
-	lines = append(lines, qrLines...)
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt)
 
-	renderer.Render(lines)
+	// Set up the TUI monitor
+	renderer := tui.NewRenderer()
+	monitor := tui.NewTunnelMonitor(port, "", httpReplayBuffer)
+	if httpPassword != "" {
+		monitor.Password = true
+	}
 
-	// In full implementation, this is where we'd:
-	// 1. Connect to the relay
-	// 2. Register the tunnel slug
-	// 3. Start forwarding requests to localhost:port
+	// Relay store for cross-process replay
+	replayStore, err := tunnel.NewReplayStore()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: replay store unavailable: %v\n", err)
+	}
+
+	// Render initial connecting state
+	monitor.SetConnected(tui.TierNone)
+	renderer.Render(monitor.Render())
+
+	// Create tunnel client with callbacks
+	relayURL := config.RelayURL()
+
+	var publicURL string
+	var tunnelClient *tunnel.TunnelClient
+
+	tunnelClient = tunnel.NewTunnelClient(tunnel.TunnelConfig{
+		Port:          port,
+		Slug:          slug,
+		PasswordHash:  passwordHash,
+		RelayURL:      relayURL,
+		ReplayBuffer:  httpReplayBuffer,
+		ReplayMaxBody: maxBody,
+		Callbacks: tunnel.TunnelCallbacks{
+			OnConnected: func(url string) {
+				publicURL = url
+				monitor.PublicURL = url
+				monitor.SetConnected(tui.TierRelayed)
+				renderer.Render(monitor.Render())
+
+				// Print QR code below the monitor
+				qrLines := tui.RenderQR(url)
+				for _, line := range qrLines {
+					fmt.Println(line)
+				}
+			},
+			OnRequest: func(method, path string, statusCode int, statusText string, latency time.Duration) {
+				monitor.LogRequest(method, path, statusCode, statusText, latency)
+				renderer.Render(monitor.Render())
+
+				// Update replay store for cross-process access
+				if replayStore != nil {
+					replayStore.Write(port, slug, publicURL, tunnelClient.ReplayBuf())
+				}
+			},
+			OnPipeChange: func(activePipes int) {
+				monitor.SetActivePipes(activePipes)
+				renderer.Render(monitor.Render())
+			},
+			OnDisconnect: func(reason string) {
+				fmt.Fprintf(os.Stderr, "\n⚠ Tunnel disconnected: %s\n", reason)
+			},
+		},
+	})
+
+	// Start the tunnel in a goroutine
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- tunnelClient.Start(ctx)
+	}()
+
+	// Wait for shutdown signal or error
+	select {
+	case <-sigCh:
+		fmt.Println("\n\n⏹ Shutting down tunnel...")
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		tunnelClient.Stop(shutdownCtx)
+		shutdownCancel()
+		cancel()
+
+	case err := <-errCh:
+		if err != nil && ctx.Err() == nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+	}
+
+	// Clean up replay store
+	if replayStore != nil {
+		replayStore.Clean()
+	}
+
+	fmt.Println("Tunnel closed.")
+}
+
+// parseBodySize parses a human-readable size string (e.g., "1MB", "5MB") into bytes.
+func parseBodySize(s string) int64 {
+	s = strings.TrimSpace(strings.ToUpper(s))
+
+	multiplier := int64(1)
+	if strings.HasSuffix(s, "GB") {
+		multiplier = 1024 * 1024 * 1024
+		s = strings.TrimSuffix(s, "GB")
+	} else if strings.HasSuffix(s, "MB") {
+		multiplier = 1024 * 1024
+		s = strings.TrimSuffix(s, "MB")
+	} else if strings.HasSuffix(s, "KB") {
+		multiplier = 1024
+		s = strings.TrimSuffix(s, "KB")
+	}
+
+	val, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+	if err != nil {
+		return 1 * 1024 * 1024 // Default: 1 MB
+	}
+	return val * multiplier
 }
 
 func init() {

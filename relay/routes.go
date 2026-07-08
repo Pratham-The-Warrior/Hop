@@ -15,23 +15,28 @@ var knownRoutes = map[string]bool{
 	"/auth":   true,
 	"/ws":     true,
 	"/signal": true,
+	"/tunnel": true,
 	"/health": true,
 }
 
-// TokenRouter wraps the standard mux and adds token-based routing.
+// TokenRouter wraps the standard mux and adds token-based and tunnel routing.
 // If a request path doesn't match any known route, it checks whether
-// the path looks like a transfer token and routes to the BrowserBridge.
+// the path looks like a transfer token (routes to BrowserBridge) or
+// a tunnel slug (routes to TunnelServer).
 type TokenRouter struct {
 	mux     *http.ServeMux
 	browser *BrowserBridge
+	tunnel  *TunnelServer
 }
 
 // NewTokenRouter creates a TokenRouter that delegates to the given mux
-// for known routes and to the BrowserBridge for token-like paths.
-func NewTokenRouter(mux *http.ServeMux, browser *BrowserBridge) *TokenRouter {
+// for known routes, to the BrowserBridge for token-like paths, and to
+// the TunnelServer for tunnel paths (/t/<slug>).
+func NewTokenRouter(mux *http.ServeMux, browser *BrowserBridge, tunnel *TunnelServer) *TokenRouter {
 	return &TokenRouter{
 		mux:     mux,
 		browser: browser,
+		tunnel:  tunnel,
 	}
 }
 
@@ -43,6 +48,23 @@ func (tr *TokenRouter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if knownRoutes[path] {
 		tr.mux.ServeHTTP(w, r)
 		return
+	}
+
+	// Check for tunnel path: /t/<slug> or /t/<slug>/<subpath>
+	if strings.HasPrefix(path, "/t/") {
+		trimmed := strings.TrimPrefix(path, "/t/")
+		// Split into slug and subpath
+		slug := trimmed
+		subpath := ""
+		if slashIdx := strings.Index(trimmed, "/"); slashIdx != -1 {
+			slug = trimmed[:slashIdx]
+			subpath = trimmed[slashIdx+1:]
+		}
+
+		if tokenPattern.MatchString(slug) {
+			tr.tunnel.HandlePublicRequest(w, r, slug, subpath)
+			return
+		}
 	}
 
 	// Check for token download path: /<token>/download
