@@ -6,6 +6,8 @@ import (
 	"io"
 	"os"
 
+	"github.com/prathmeshsarda/hop/pkg/archive"
+	hopcompress "github.com/prathmeshsarda/hop/pkg/compress"
 	hopcrypto "github.com/prathmeshsarda/hop/pkg/crypto"
 	"github.com/prathmeshsarda/hop/pkg/protocol"
 	"github.com/prathmeshsarda/hop/pkg/tui"
@@ -52,7 +54,7 @@ const (
 //  3. Send TRANSFER_OFFER and wait for ACCEPT/REJECT
 //  4. Stream encrypted chunks with CRC-32 integrity
 //  5. Send TRANSFER_COMPLETE with final hash
-func SendFile(ctx context.Context, transport Transport, filePath string, compress bool, limiter *TokenBucketLimiter, callbacks *EngineCallbacks) error {
+func SendFile(ctx context.Context, transport Transport, filePath string, isDir bool, compress bool, limiter *TokenBucketLimiter, callbacks *EngineCallbacks) error {
 	if callbacks == nil {
 		callbacks = &EngineCallbacks{}
 	}
@@ -127,6 +129,7 @@ func SendFile(ctx context.Context, transport Transport, filePath string, compres
 		FileName:   fileInfo.Name(),
 		FileSize:   fileInfo.Size(),
 		SHA256:     fileHash,
+		IsDir:      isDir,
 		ChunkSize:  DefaultChunkSize,
 		Compressed: compress,
 	}
@@ -169,6 +172,16 @@ func SendFile(ctx context.Context, transport Transport, filePath string, compres
 		return fmt.Errorf("creating chunker: %w", err)
 	}
 	defer chunker.Close()
+
+	// Set up optional zstd compressor
+	var compressor *hopcompress.Compressor
+	if compress {
+		compressor, err = hopcompress.NewCompressor()
+		if err != nil {
+			return fmt.Errorf("creating compressor: %w", err)
+		}
+		defer compressor.Close()
+	}
 
 	var totalBytesSent int64
 	var totalChunks uint64
@@ -215,7 +228,13 @@ func SendFile(ctx context.Context, transport Transport, filePath string, compres
 			limiter.Wait(chunk.Size)
 		}
 
-		// Compute CRC-32 of the plaintext chunk
+		// Compress chunk data if compression is enabled.
+		// Pipeline: read → compress → CRC-32(compressed) → encrypt(compressed) → send
+		if compressor != nil {
+			chunkData = compressor.CompressChunk(chunkData)
+		}
+
+		// Compute CRC-32 of the data being transmitted (compressed if applicable)
 		crc := hopcrypto.ChunkCRC32(chunkData)
 
 		// Encrypt the chunk data
@@ -417,6 +436,16 @@ func ReceiveFile(ctx context.Context, transport Transport, outputDir string, ena
 	fileHasher := hopcrypto.NewFileHasher()
 	var totalBytesReceived int64
 
+	// Set up optional zstd decompressor if the sender indicated compression
+	var decompressor *hopcompress.Decompressor
+	if offer.Compressed {
+		decompressor, err = hopcompress.NewDecompressor()
+		if err != nil {
+			return fmt.Errorf("creating decompressor: %w", err)
+		}
+		defer decompressor.Close()
+	}
+
 	if resumeState != nil {
 		// Append mode: open existing partial file
 		outFile, err = os.OpenFile(outPath, os.O_WRONLY|os.O_APPEND, 0644)
@@ -485,6 +514,17 @@ func ReceiveFile(ctx context.Context, transport Transport, outputDir string, ena
 			if callbacks.OnComplete != nil {
 				callbacks.OnComplete(fileHasher.SumHex())
 			}
+
+			// Auto-unpack directory archives
+			if offer.IsDir {
+				outFile.Close() // Close before unpacking
+				if err := archive.UnpackArchive(outPath, outputDir); err != nil {
+					return fmt.Errorf("unpacking directory archive: %w", err)
+				}
+				// Remove the archive file — the user should only see the directory
+				os.Remove(outPath)
+			}
+
 			return nil
 		}
 
@@ -519,13 +559,23 @@ func ReceiveFile(ctx context.Context, transport Transport, outputDir string, ena
 			return fmt.Errorf("decrypting chunk %d: %w", chunkHdr.Index, err)
 		}
 
-		// Verify CRC-32
+		// Verify CRC-32 (on compressed data if compression was used)
 		if !hopcrypto.VerifyChunkCRC32(plaintext, chunkHdr.CRC32) {
 			return fmt.Errorf("CRC-32 mismatch on chunk %d: data corrupted in transit", chunkHdr.Index)
 		}
 
+		// Decompress if needed.
+		// Pipeline: receive → decrypt → CRC-32 verify(compressed) → decompress → write
+		writeData := plaintext
+		if decompressor != nil {
+			writeData, err = decompressor.DecompressChunk(plaintext)
+			if err != nil {
+				return fmt.Errorf("decompressing chunk %d: %w", chunkHdr.Index, err)
+			}
+		}
+
 		// Write to disk
-		n, err := outFile.Write(plaintext)
+		n, err := outFile.Write(writeData)
 		if err != nil {
 			// Write marker before returning error so we can resume
 			if enableResume {
@@ -534,8 +584,8 @@ func ReceiveFile(ctx context.Context, transport Transport, outputDir string, ena
 			return fmt.Errorf("writing chunk %d to disk: %w", chunkHdr.Index, err)
 		}
 
-		// Feed into file hasher for final verification
-		fileHasher.Write(plaintext)
+		// Feed the raw (decompressed) data into file hasher for final verification
+		fileHasher.Write(writeData)
 
 		totalBytesReceived += int64(n)
 

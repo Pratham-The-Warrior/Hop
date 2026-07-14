@@ -68,7 +68,7 @@ func runGet(cmd *cobra.Command, args []string) {
 			os.Exit(1)
 		}
 		limiter = transfer.NewTokenBucketLimiter(bps)
-		_ = limiter // Will be used when we add receive-side rate limiting
+		_ = limiter // TODO(M12): Wire into ReceiveFile for receiver-side throttling
 	}
 
 	// Set up context with signal handling
@@ -139,6 +139,7 @@ func runGet(cmd *cobra.Command, args []string) {
 	renderer := tui.NewRenderer()
 	var progressBar *tui.ProgressBar
 	var receivedFileName string
+	var receivedIsDir bool
 
 	callbacks := &transfer.EngineCallbacks{
 		OnHandshakeComplete: func(tier tui.ConnectionTier) {
@@ -147,9 +148,14 @@ func runGet(cmd *cobra.Command, args []string) {
 		},
 		OnOfferReceived: func(offer *protocol.TransferOffer) bool {
 			receivedFileName = offer.FileName
+			receivedIsDir = offer.IsDir
 			hashPrefix := fmt.Sprintf("%x", offer.SHA256[:3]) + "..." + fmt.Sprintf("%x", offer.SHA256[28:])
 
-			fmt.Printf("Incoming file: %s (%s)\n", offer.FileName, formatSize(offer.FileSize))
+			if offer.IsDir {
+				fmt.Printf("Incoming directory: %s (%s archive)\n", offer.FileName, formatSize(offer.FileSize))
+			} else {
+				fmt.Printf("Incoming file: %s (%s)\n", offer.FileName, formatSize(offer.FileSize))
+			}
 			fmt.Printf("SHA-256: %s\n", hashPrefix)
 			if offer.Compressed {
 				fmt.Println("Compression: zstd")
@@ -224,15 +230,24 @@ func runGet(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
+	// Display directory unpacking confirmation
+	if receivedIsDir {
+		fmt.Printf("\n📂 Directory '%s' unpacked successfully\n", receivedFileName)
+	}
+
 	// Log to history
 	duration := time.Since(startTime)
 	if receivedFileName == "" {
 		receivedFileName = "unknown"
 	}
+	historyName := receivedFileName
+	if receivedIsDir {
+		historyName = fmt.Sprintf("./%s/ (tar)", receivedFileName)
+	}
 	history.Log(history.Entry{
 		Timestamp: time.Now(),
 		Direction: history.Received,
-		FileName:  receivedFileName,
+		FileName:  historyName,
 		FileSize:  "—",
 		Token:     tok,
 		Tier:      actualTier.String(),

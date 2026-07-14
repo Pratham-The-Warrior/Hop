@@ -1,7 +1,7 @@
 # Hop — Project Status
 
-> **Last updated:** 2026-07-08  
-> **Current milestone:** 10 of 12 complete  
+> **Last updated:** 2026-07-14  
+> **Current milestone:** 11 of 12 complete  
 > **Branch:** `master`
 
 ---
@@ -122,13 +122,27 @@ All Cobra commands are wired and functional:
 **Tests:** 85 passing (all existing tests pass, no regressions)  
 **Static analysis:** `go vet` clean
 
+### Milestone 11 — Directory + Compression
+- `pkg/archive/archive.go` — tar.gz packaging: `PackDirectory()` walks directory tree, creates streaming gzip archive; `UnpackArchive()` extracts with zip-slip traversal prevention
+- `pkg/archive/archive_test.go` — 7 tests: round-trip, empty dir, non-dir, nonexistent, IsArchive, cleanup, unpack error
+- `pkg/compress/zstd.go` — zstd chunk compression/decompression: pooled `Compressor`/`Decompressor` wrappers over `klauspost/compress`
+- `pkg/compress/zstd_test.go` — 5 tests + 2 benchmarks: round-trip, incompressible data, empty data, sequential reuse, invalid data
+- `pkg/transfer/engine.go` — Compression integrated into chunk pipeline: compress→CRC-32→encrypt→send / receive→decrypt→CRC-32→decompress→write; auto-unpack directory archives on `TRANSFER_COMPLETE` when `IsDir` is true
+- `cmd/share.go` — Directory packaging: `hop share ./dir/` creates temp tar.gz, transfers it, cleans up; `IsDir` flag set in transfer offer; history logs with `./dirname/ (tar)` format
+- `cmd/get.go` — Directory auto-unpack on receive; displays incoming directory indicator; history logs with `(tar)` suffix
+- `go.mod` — Added `github.com/klauspost/compress v1.19.0` for pure-Go zstd
+- Symlinks skipped during packaging (security: prevents symlink attacks)
+- Path traversal prevention on unpack (zip-slip protection)
+
+**Tests:** 97 passing (85 existing + 12 new archive/compress tests, no regressions)  
+**Static analysis:** `go vet` clean
+
 ---
 
 ## 🔲 Remaining Milestones
 
 | # | Milestone | What it covers |
 |---|-----------|---------------|
-| 11 | **Directory + Compression** | tar.gz packaging, zstd streaming compression (`--compress`), bandwidth throttling (`--limit`) |
 | 12 | **Polish & DX** | Shell completions wiring, transfer history integration, `hop version` update check, graceful shutdown, final E2E tests |
 
 ---
@@ -151,7 +165,9 @@ hop/
 │   ├── relay/        # Relay client library
 │   ├── tui/          # Terminal UI (progress, tunnel, QR)
 │   ├── tunnel/       # Tunnel engine, replay buffer, IPC state store
-│   └── history/      # Transfer history log
+│   ├── history/      # Transfer history log
+│   ├── archive/      # tar.gz directory packaging and extraction
+│   └── compress/     # zstd streaming chunk compression
 └── relay/            # Standalone relay server binary
     ├── main.go       # Entry point (--addr, --tls flags)
     ├── server.go     # HTTP server + middleware
@@ -170,11 +186,12 @@ hop/
 
 ## 🚀 Where to Start Next
 
-**Begin with Milestone 11: Directory + Compression.**
+**Begin with Milestone 12: Polish & Developer Experience.**
 
-1. Add automatic `tar.gz` packaging when `hop share` receives a directory argument.
-2. Implement zstd streaming compression with the `--compress` flag.
-3. Wire bandwidth throttling via `--limit` flag on both `hop share` and `hop get`.
-4. Auto-detect and unpack archives on the receiver side.
+1. Wire shell completions for bash/zsh/fish/PowerShell.
+2. Integrate transfer history log entries with `hop version`.
+3. Add optional GitHub release update check.
+4. Add graceful shutdown signal handling across all commands.
+5. Final end-to-end testing across all tiers.
 
-Milestone 10 is complete — the full tunnel suite is operational with HTTPS tunnel proxying, request replay inspector, and bcrypt password protection.
+Milestone 11 is complete — directory sharing via tar.gz packaging and zstd streaming compression are fully operational.

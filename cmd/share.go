@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prathmeshsarda/hop/pkg/archive"
 	"github.com/prathmeshsarda/hop/pkg/config"
 	"github.com/prathmeshsarda/hop/pkg/crypto"
 	"github.com/prathmeshsarda/hop/pkg/history"
@@ -46,16 +47,43 @@ func runShare(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
-	// Directories will be handled in Milestone 11 (tar.gz packaging)
-	if info.IsDir() {
-		fmt.Fprintf(os.Stderr, "Error: directory sharing requires packaging (coming in a future release).\n")
-		fmt.Fprintf(os.Stderr, "Hint: share individual files for now, e.g., 'hop share myfile.txt'\n")
-		os.Exit(1)
+	// Handle directory packaging: create a temporary .tar.gz archive
+	isDir := info.IsDir()
+	var archivePath string
+	if isDir {
+		fmt.Printf("Packaging directory '%s'...\n", filepath.Base(target))
+		packResult, err := archive.PackDirectory(target)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: failed to package directory: %v\n", err)
+			os.Exit(1)
+		}
+		archivePath = packResult.ArchivePath
+		defer archive.CleanupArchive(archivePath)
+
+		fmt.Printf("Packaged %d files (%s) into archive\n",
+			packResult.FileCount, formatSize(packResult.TotalSize))
+
+		// Switch target to the archive for transfer
+		target = archivePath
+		// Re-stat the archive file
+		info, err = os.Stat(archivePath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: cannot access archive: %v\n", err)
+			os.Exit(1)
+		}
 	}
 
 	tok := token.Generate()
 	link := fmt.Sprintf("https://hop.to/%s", tok)
-	name := filepath.Base(target)
+	var name string
+	if isDir {
+		// Use the original directory name for display, but the archive
+		// filename (.tar.gz) is what gets transferred over the wire.
+		// The receiver sees the IsDir flag and auto-unpacks.
+		name = filepath.Base(args[0])
+	} else {
+		name = filepath.Base(target)
+	}
 	startTime := time.Now()
 
 	// Pre-compute SHA-256 with a spinner
@@ -136,6 +164,9 @@ func runShare(cmd *cobra.Command, args []string) {
 	waitingLines = append(waitingLines, "hop")
 	waitingLines = append(waitingLines, strings.Repeat("─", 50))
 	waitingLines = append(waitingLines, fmt.Sprintf("sharing '%s' (%s)", name, formatSize(info.Size())))
+	if isDir {
+		waitingLines = append(waitingLines, "Type:  directory (tar.gz archive)")
+	}
 	waitingLines = append(waitingLines, fmt.Sprintf("Token: %s", tok))
 	waitingLines = append(waitingLines, fmt.Sprintf("Link:  %s", link))
 	waitingLines = append(waitingLines, fmt.Sprintf("Connection: %s", tui.TierNone.String()))
@@ -224,7 +255,7 @@ func runShare(cmd *cobra.Command, args []string) {
 		_ = cliErr // The HOP_HELLO message is handled inside SendFile's receive loop
 		fmt.Println("\n🔒 CLI receiver connected — using end-to-end encryption")
 
-		err = transfer.SendFile(ctx, transport, target, shareCompress, limiter, callbacks)
+		err = transfer.SendFile(ctx, transport, target, isDir, shareCompress, limiter, callbacks)
 	}
 
 	if err != nil {
@@ -242,10 +273,14 @@ func runShare(cmd *cobra.Command, args []string) {
 	if browserDownloadCount > 0 {
 		tierName = fmt.Sprintf("%s (browser×%d)", actualTier.String(), browserDownloadCount)
 	}
+	historyName := name
+	if isDir {
+		historyName = fmt.Sprintf("./%s/ (tar)", name)
+	}
 	history.Log(history.Entry{
 		Timestamp: time.Now(),
 		Direction: history.Sent,
-		FileName:  name,
+		FileName:  historyName,
 		FileSize:  formatSize(info.Size()),
 		Token:     tok,
 		Tier:      tierName,
