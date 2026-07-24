@@ -197,6 +197,7 @@ func runShare(cmd *cobra.Command, args []string) {
 	go func() {
 		select {
 		case <-sigCh:
+			signal.Stop(sigCh)
 			fmt.Println("\n\nTransfer cancelled.")
 			cancelMsg := &protocol.Message{Type: protocol.MsgTransferCancel}
 			_ = client.Send(context.Background(), cancelMsg)

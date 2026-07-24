@@ -68,7 +68,6 @@ func runGet(cmd *cobra.Command, args []string) {
 			os.Exit(1)
 		}
 		limiter = transfer.NewTokenBucketLimiter(bps)
-		_ = limiter // TODO(M12): Wire into ReceiveFile for receiver-side throttling
 	}
 
 	// Set up context with signal handling
@@ -126,6 +125,7 @@ func runGet(cmd *cobra.Command, args []string) {
 	go func() {
 		select {
 		case <-sigCh:
+			signal.Stop(sigCh)
 			fmt.Println("\n\nTransfer cancelled.")
 			cancelMsg := &protocol.Message{Type: protocol.MsgTransferCancel}
 			_ = transport.Send(context.Background(), cancelMsg)
@@ -221,7 +221,7 @@ func runGet(cmd *cobra.Command, args []string) {
 		},
 	}
 
-	err = transfer.ReceiveFile(ctx, transport, outputDir, getResume, callbacks)
+	err = transfer.ReceiveFile(ctx, transport, outputDir, getResume, limiter, callbacks)
 	if err != nil {
 		if ctx.Err() != nil {
 			os.Exit(1)

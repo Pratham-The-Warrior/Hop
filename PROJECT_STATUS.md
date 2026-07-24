@@ -1,7 +1,7 @@
 # Hop — Project Status
 
-> **Last updated:** 2026-07-14  
-> **Current milestone:** 11 of 12 complete  
+> **Last updated:** 2026-07-24  
+> **Current milestone:** 12 of 12 complete ✅  
 > **Branch:** `master`
 
 ---
@@ -137,13 +137,20 @@ All Cobra commands are wired and functional:
 **Tests:** 97 passing (85 existing + 12 new archive/compress tests, no regressions)  
 **Static analysis:** `go vet` clean
 
----
+### Milestone 12 — Polish & Developer Experience
+- `cmd/history.go` — `hop history` subcommand: formatted table view of all transfers, `--last N` and `--clear` flags
+- `cmd/root.go` — `hop version --check-update`: GitHub Releases API update checker with 3s timeout, semver comparison
+- `pkg/update/update.go` — GitHub release fetch + semver comparison logic (never blocks CLI on failure)
+- `pkg/update/update_test.go` — 7 tests: version comparison (14 cases), version parsing (7 cases), mock HTTP API tests
+- `cmd/completion.go` — Enhanced shell completions: dynamic port suggestions for `hop http`, bandwidth limit suggestions for `--limit`, directory filtering for `--output`
+- `pkg/transfer/engine.go` — Receiver-side bandwidth throttling: `limiter *TokenBucketLimiter` parameter added to `ReceiveFile()`
+- `cmd/get.go` — Wired `--limit` flag into `ReceiveFile()` (resolved TODO from M11)
+- `cmd/share.go`, `cmd/get.go`, `cmd/http.go` — Graceful shutdown hardening: `signal.Stop()` after signal catch, `syscall.SIGTERM` across all commands
+- `cmd/cmd_test.go` — 11 tests: version constants, history log/list/clear, all 4 completion generators, string truncation
+- `pkg/transfer/engine_e2e_test.go` — 6 tests: sender rate limiting + integrity, progress callback monotonicity, small file transfer, context cancellation, token bucket Wait/TryConsume
 
-## 🔲 Remaining Milestones
-
-| # | Milestone | What it covers |
-|---|-----------|---------------|
-| 12 | **Polish & DX** | Shell completions wiring, transfer history integration, `hop version` update check, graceful shutdown, final E2E tests |
+**Tests:** 114 passing (97 existing + 17 new, no regressions)  
+**Static analysis:** `go vet` clean
 
 ---
 
@@ -155,6 +162,8 @@ hop/
 ├── cmd/
 │   ├── root.go, share.go, get.go
 │   ├── http.go, replay.go, completion.go
+│   ├── history.go            # [NEW] Transfer history viewer
+│   └── cmd_test.go           # [NEW] Command-level tests
 ├── pkg/
 │   ├── config/       # Relay URL and env configuration
 │   ├── crypto/       # X25519, ChaCha20, CRC-32, SHA-256
@@ -167,7 +176,8 @@ hop/
 │   ├── tunnel/       # Tunnel engine, replay buffer, IPC state store
 │   ├── history/      # Transfer history log
 │   ├── archive/      # tar.gz directory packaging and extraction
-│   └── compress/     # zstd streaming chunk compression
+│   ├── compress/     # zstd streaming chunk compression
+│   └── update/       # [NEW] GitHub release update checker
 └── relay/            # Standalone relay server binary
     ├── main.go       # Entry point (--addr, --tls flags)
     ├── server.go     # HTTP server + middleware
@@ -184,14 +194,15 @@ hop/
 
 ---
 
-## 🚀 Where to Start Next
+## ✅ Project Complete
 
-**Begin with Milestone 12: Polish & Developer Experience.**
+All 12 milestones are finished. Hop is a fully functional, single-binary Go CLI for **direct P2P file transfers** and **localhost web tunneling** with:
 
-1. Wire shell completions for bash/zsh/fish/PowerShell.
-2. Integrate transfer history log entries with `hop version`.
-3. Add optional GitHub release update check.
-4. Add graceful shutdown signal handling across all commands.
-5. Final end-to-end testing across all tiers.
-
-Milestone 11 is complete — directory sharing via tar.gz packaging and zstd streaming compression are fully operational.
+- 🔐 End-to-end encryption (X25519 + ChaCha20-Poly1305)
+- 🌍 3-tier connectivity (LAN → P2P → Relay)
+- 📂 Directory sharing with tar.gz packaging + zstd compression
+- 🌐 Browser Bridge for non-CLI recipients
+- 🔗 HTTPS localhost tunneling with request replay
+- ⏸️ Chunk-level resume with crash-safe markers
+- 📊 Transfer history, version checking, shell completions
+- ✅ 114 tests passing, `go vet` clean

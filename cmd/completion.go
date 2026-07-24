@@ -54,4 +54,60 @@ PowerShell:
 
 func init() {
 	rootCmd.AddCommand(completionCmd)
+
+	// --- Dynamic completion functions ---
+
+	// 'hop http <port>' suggests common development ports
+	httpCmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) != 0 {
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
+		return []string{
+			"3000\tNode.js / React dev server",
+			"8080\tCommon HTTP alternative",
+			"8000\tPython / Django dev server",
+			"5000\tFlask dev server",
+			"5173\tVite dev server",
+			"4200\tAngular dev server",
+			"3001\tNext.js alternate",
+			"8888\tJupyter notebook",
+		}, cobra.ShellCompDirectiveNoFileComp
+	}
+
+	// 'hop share <file>' provides file/directory completion (default shell behavior)
+	shareCmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) != 0 {
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
+		// ShellCompDirectiveDefault enables default file completion
+		return nil, cobra.ShellCompDirectiveDefault
+	}
+
+	// 'hop get <token>' disables file completion since tokens are typed manually
+	getCmd.ValidArgsFunction = func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		if len(args) != 0 {
+			return nil, cobra.ShellCompDirectiveNoFileComp
+		}
+		return nil, cobra.ShellCompDirectiveNoFileComp
+	}
+
+	// Flag completions for common bandwidth limit values
+	shareCmd.RegisterFlagCompletionFunc("limit", completeBandwidthLimit)
+	getCmd.RegisterFlagCompletionFunc("limit", completeBandwidthLimit)
+
+	// Flag completions for output directory on 'hop get'
+	getCmd.RegisterFlagCompletionFunc("output", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+		return nil, cobra.ShellCompDirectiveFilterDirs
+	})
+}
+
+// completeBandwidthLimit suggests common bandwidth limit values for --limit flag.
+func completeBandwidthLimit(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
+	return []string{
+		"1MB/s\tSlow — preserve bandwidth",
+		"5MB/s\tModerate",
+		"10MB/s\tFast",
+		"25MB/s\tVery fast",
+		"50MB/s\tMaximum practical",
+	}, cobra.ShellCompDirectiveNoFileComp
 }

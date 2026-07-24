@@ -309,7 +309,7 @@ func SendFile(ctx context.Context, transport Transport, filePath string, isDir b
 //  2. Receive TRANSFER_OFFER and present to user for acceptance
 //  3. Receive encrypted chunks, decrypt, verify CRC-32, write to disk
 //  4. Verify final SHA-256 hash
-func ReceiveFile(ctx context.Context, transport Transport, outputDir string, enableResume bool, callbacks *EngineCallbacks) error {
+func ReceiveFile(ctx context.Context, transport Transport, outputDir string, enableResume bool, limiter *TokenBucketLimiter, callbacks *EngineCallbacks) error {
 	if callbacks == nil {
 		callbacks = &EngineCallbacks{}
 	}
@@ -572,6 +572,11 @@ func ReceiveFile(ctx context.Context, transport Transport, outputDir string, ena
 			if err != nil {
 				return fmt.Errorf("decompressing chunk %d: %w", chunkHdr.Index, err)
 			}
+		}
+
+		// Apply receiver-side rate limiting if configured
+		if limiter != nil {
+			limiter.Wait(len(writeData))
 		}
 
 		// Write to disk
